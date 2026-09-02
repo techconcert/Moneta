@@ -1,0 +1,6 @@
+{
+  "name": "Moneta - Personal Finance",
+  "description": "Multi-currency financial hub supporting bank sync, statement imports, interactive spending analytics, and AI category insights.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
