@@ -1109,7 +1109,25 @@ Choose Lucide icons like: ShoppingBag, Coffee, Dumbbell, Car, Utensils, Tv, Plan
 
 // AI Financial Advisor & Insights Endpoint
 app.post("/api/ai/insights", async (req, res) => {
-  const { transactions, baseCurrency, totalIncome, totalExpenses, netWorth } = req.body;
+  const { transactions, baseCurrency, totalIncome, totalExpenses, netWorth, recurringSummary } = req.body;
+
+  const activeSubCount = recurringSummary?.activeCount ?? 0;
+  const activeSubCost = recurringSummary?.totalMonthlyCost
+    ? Number(recurringSummary.totalMonthlyCost.toFixed(2))
+    : 0;
+  const activeSubNames = (recurringSummary?.services || []).map((s: any) => s.name).join(", ");
+  const activeSubDetails = (recurringSummary?.services || []).map((s: any) => {
+    let line = `- ${s.name}: ${s.monthlyCost} ${s.currency}/mo (Cadence: ${s.frequency || 'monthly'})`;
+    if (s.tierCount && s.tierCount > 1) {
+      line += ` [3-Month Rolling History: ${s.tierCount} recurring tiers consolidated, 3-mo monthly average: ${s.rolling3MonthMonthlyAverage ? s.rolling3MonthMonthlyAverage.toFixed(2) : s.monthlyCost} ${s.currency}${s.pendingThisMonthCount ? `, ${s.pendingThisMonthCount} pending charges expected later this month` : ''}]`;
+    }
+    return line;
+  }).join("\n");
+
+  const subDescription =
+    activeSubCount > 0
+      ? `You are spending approx. ${baseCurrency || "USD"} ${activeSubCost}/mo across ${activeSubCount} active recurring services (${activeSubNames || "streaming, SaaS, gym"}).`
+      : "Review your active digital subscriptions (streaming, SaaS tools, delivery) to eliminate unused recurring charges.";
 
   const fallbackInsights = [
     {
@@ -1125,9 +1143,11 @@ app.post("/api/ai/insights", async (req, res) => {
     {
       id: `ins_sub_${Date.now()}`,
       type: "subscription_found",
-      title: "Recurring Subscriptions Active",
-      description: "Review your active digital subscriptions (streaming, SaaS tools, delivery) to eliminate unused recurring charges.",
-      suggestedAction: "Audit recurring charges in the Transactions tab.",
+      title: activeSubCount > 0 ? `${activeSubCount} Active Subscriptions Audited` : "Recurring Subscriptions Active",
+      description: subDescription,
+      impactAmount: activeSubCost > 0 ? activeSubCost : undefined,
+      currency: baseCurrency || "USD",
+      suggestedAction: "Review active subscriptions to prune unused services or negotiate plans.",
       icon: "Sparkles",
     },
     {
@@ -1152,14 +1172,20 @@ app.post("/api/ai/insights", async (req, res) => {
     }));
 
     const prompt = `You are Moneta AI, a high-precision personal finance advisor. Analyze the user's financial transactions in USD and BRL (Base Currency: ${baseCurrency || "USD"}).
-Summary: Total Income = ${totalIncome}, Total Expenses = ${totalExpenses}, Net Worth = ${netWorth}.
+Financial Summary: Total Income = ${totalIncome}, Total Expenses = ${totalExpenses}, Net Worth = ${netWorth}.
+Active Recurring Subscriptions (Calculated using 3-month rolling historical data & vendor consolidation):
+${
+      activeSubCount > 0
+        ? `Total: ${activeSubCount} verified active services totaling ${activeSubCost} ${baseCurrency || "USD"}/mo.\nServices Breakdown:\n${activeSubDetails}`
+        : "None detected or none active"
+    }
 
 Transactions Sample:
 ${JSON.stringify(sampleLedger, null, 2)}
 
 Identify 3 key insights:
 1. An anomaly or spending spike (e.g., dining, shopping, transportation).
-2. Subscription/recurring bill analysis.
+2. Subscription/recurring bill analysis (CRITICAL: You must use the verified recurring subscription numbers and 3-month rolling historical data provided above: ${activeSubCount} active services totaling ${activeSubCost} ${baseCurrency || "USD"}/mo. Note that vendors like Apple/Google consolidate multiple recurring sub-streams from 3-month history even if some charges are still pending to hit later this month).
 3. An actionable saving or budget optimization tip.`;
 
     for (const modelName of modelsToTry) {

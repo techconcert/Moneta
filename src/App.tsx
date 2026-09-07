@@ -6,6 +6,7 @@ import {
 } from './types';
 import { db } from './lib/db';
 import { DEFAULT_RATES, convertCurrency } from './lib/currency';
+import { analyzeRecurringServices } from './lib/subscriptions';
 import { ParsedImportResult } from './lib/parsers';
 import { Header } from './components/Header';
 import { OverviewTab } from './components/OverviewTab';
@@ -46,6 +47,7 @@ export default function App() {
   const [selectedCategoryForTransactions, setSelectedCategoryForTransactions] = useState<string>('all');
   const [selectedMonthForTransactions, setSelectedMonthForTransactions] = useState<string>('all');
   const [selectedTypeFilterForTransactions, setSelectedTypeFilterForTransactions] = useState<'all' | 'income' | 'expense' | 'transfer'>('all');
+  const [selectedSearchForTransactions, setSelectedSearchForTransactions] = useState<string>('');
 
   // Computed visible accounts and transactions (excluding hidden ones)
   const visibleAccounts = React.useMemo(() => {
@@ -1094,6 +1096,43 @@ export default function App() {
         0
       );
 
+      // Perform accurate recurring subscription analysis respecting user custom settings & exclusions
+      let userCustomSettings = {};
+      let userExcludedSubs: string[] = [];
+      try {
+        const savedCustom = localStorage.getItem('moneta_subscription_custom_settings');
+        if (savedCustom) userCustomSettings = JSON.parse(savedCustom);
+        const savedExcluded = localStorage.getItem('moneta_excluded_subscriptions');
+        if (savedExcluded) userExcludedSubs = JSON.parse(savedExcluded);
+      } catch {}
+
+      const recurringData = analyzeRecurringServices(
+        visibleTransactions,
+        categories,
+        baseCurrency,
+        exchangeRates.rates,
+        userExcludedSubs,
+        userCustomSettings
+      );
+
+      const recurringSummary = {
+        activeCount: recurringData.activeCount,
+        totalMonthlyCost: recurringData.totalMonthlyCost,
+        services: recurringData.activeServices.map((s) => ({
+          name: s.cleanName,
+          regularAmount: s.regularAmount,
+          currency: s.currency,
+          monthlyCost: s.monthlyCost,
+          frequency: s.frequency,
+          rolling3MonthTotal: s.rolling3MonthTotal,
+          rolling3MonthMonthlyAverage: s.rolling3MonthMonthlyAverage,
+          isConsolidatedVendor: s.isConsolidatedVendor,
+          pendingThisMonthCount: s.pendingThisMonthCount,
+          tierCount: s.tiers?.length || 1,
+          tiers: s.tiers,
+        })),
+      };
+
       const res = await safeJsonFetch<any>('/api/ai/insights', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1103,6 +1142,7 @@ export default function App() {
           totalIncome,
           totalExpenses,
           netWorth: netWorthVal,
+          recurringSummary,
         }),
       });
 
@@ -1261,6 +1301,8 @@ export default function App() {
             onClearMonthFilter={() => setSelectedMonthForTransactions('all')}
             activeTypeFilter={selectedTypeFilterForTransactions}
             onClearTypeFilter={() => setSelectedTypeFilterForTransactions('all')}
+            initialSearchTerm={selectedSearchForTransactions}
+            onClearSearchTerm={() => setSelectedSearchForTransactions('')}
           />
         )}
 
@@ -1306,10 +1348,17 @@ export default function App() {
           <InsightsTab
             insights={insights}
             transactions={visibleTransactions}
+            categories={categories}
             baseCurrency={baseCurrency}
             exchangeRates={exchangeRates}
             onRefreshInsights={handleRefreshInsights}
             isGeneratingInsights={isGeneratingInsights}
+            onNavigateToTransactions={(search) => {
+              setSelectedSearchForTransactions(search || '');
+              setSelectedCategoryForTransactions('all');
+              setSelectedMonthForTransactions('all');
+              setActiveTab('transactions');
+            }}
           />
         )}
 

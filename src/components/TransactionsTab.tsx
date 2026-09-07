@@ -8,7 +8,7 @@ import { BankLogo } from './BankLogo';
 import {
   Search, Plus, Sparkles, Trash2, Edit3,
   Upload, X, Calendar, ChevronLeft, ChevronRight,
-  Filter, RotateCcw, ArrowLeftRight
+  Filter, RotateCcw, ArrowLeftRight, RefreshCw
 } from 'lucide-react';
 
 interface TransactionsTabProps {
@@ -29,6 +29,8 @@ interface TransactionsTabProps {
   onClearMonthFilter?: () => void;
   activeTypeFilter?: 'all' | 'income' | 'expense' | 'transfer';
   onClearTypeFilter?: () => void;
+  initialSearchTerm?: string;
+  onClearSearchTerm?: () => void;
 }
 
 export const TransactionsTab: React.FC<TransactionsTabProps> = ({
@@ -49,8 +51,10 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
   onClearMonthFilter,
   activeTypeFilter = 'all',
   onClearTypeFilter,
+  initialSearchTerm,
+  onClearSearchTerm,
 }) => {
-  const [searchTerm, setSearchTerm] = useState('');
+  const [searchTerm, setSearchTerm] = useState(initialSearchTerm || '');
   const [categoryFilter, setCategoryFilter] = useState(activeCategoryFilter);
   const [accountFilter, setAccountFilter] = useState('all');
   const [currencyFilter, setCurrencyFilter] = useState('all');
@@ -71,6 +75,13 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
       setTypeFilter(activeTypeFilter);
     }
   }, [activeTypeFilter]);
+
+  // Sync initial search term if navigated with search query (e.g. from Insights subscription click)
+  useEffect(() => {
+    if (initialSearchTerm !== undefined) {
+      setSearchTerm(initialSearchTerm);
+    }
+  }, [initialSearchTerm]);
 
   // Sync month filter to date ranges
   useEffect(() => {
@@ -150,6 +161,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
     currency: (accounts[0]?.currency || 'USD') as Currency,
     tags: '',
     notes: '',
+    isRecurring: false,
   });
 
   const resetPage = () => setCurrentPage(1);
@@ -165,6 +177,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
       currency: accounts[0]?.currency || 'USD',
       tags: 'manual',
       notes: '',
+      isRecurring: false,
     });
     setEditingTx(null);
     setIsAddModalOpen(true);
@@ -182,6 +195,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
       currency: tx.currency,
       tags: tx.tags.join(', '),
       notes: tx.notes || '',
+      isRecurring: !!tx.isRecurring,
     });
     setIsAddModalOpen(true);
   };
@@ -205,6 +219,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
       category: formData.category,
       tags: formData.tags.split(',').map((t) => t.trim()).filter(Boolean),
       pending: false,
+      isRecurring: formData.isRecurring,
       notes: formData.notes,
       provider: editingTx ? editingTx.provider : 'manual',
       isManualCategory: true,
@@ -541,6 +556,11 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                               <ArrowLeftRight className="w-2.5 h-2.5 mr-1 text-slate-500" /> Transfer
                             </span>
                           )}
+                          {tx.isRecurring && (
+                            <span className="inline-flex items-center text-[10px] font-semibold text-purple-700 bg-purple-50 px-1.5 py-0.2 rounded border border-purple-200" title="Recurring charge / subscription">
+                              <RefreshCw className="w-2.5 h-2.5 mr-1 text-purple-500" /> Recurring
+                            </span>
+                          )}
                           {tx.tags && tx.tags.length > 0 && tx.tags.map((tag, i) => (
                             <span key={i} className="text-[10px] px-1.5 py-0.2 rounded bg-slate-100 text-slate-500 font-medium">
                               #{tag}
@@ -838,6 +858,19 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                   onChange={(e) => setFormData({ ...formData, tags: e.target.value })}
                   className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-500"
                 />
+              </div>
+
+              <div className="flex items-center space-x-3 p-3 bg-purple-50/60 rounded-xl border border-purple-100">
+                <input
+                  type="checkbox"
+                  id="isRecurring"
+                  checked={formData.isRecurring}
+                  onChange={(e) => setFormData({ ...formData, isRecurring: e.target.checked })}
+                  className="w-4 h-4 rounded text-purple-600 focus:ring-purple-500 border-slate-300"
+                />
+                <label htmlFor="isRecurring" className="text-xs font-semibold text-purple-900 cursor-pointer select-none">
+                  Mark as Recurring / Subscription charge (included in Subscriptions Audit)
+                </label>
               </div>
 
               <div className="pt-4 flex items-center justify-end space-x-3 border-t border-slate-100">

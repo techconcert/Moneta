@@ -2046,9 +2046,9 @@ export class LocalDatabase {
       {
         id: 'ins_1',
         type: 'subscription_found',
-        title: '5 Active Subscriptions Detected',
-        description: 'You are spending approx. $49.99/mo on recurring services (Netflix, Spotify, GitHub, SmartFit).',
-        impactAmount: 49.99,
+        title: '4 Active Subscriptions Detected',
+        description: 'You are spending approx. $54.65/mo on recurring services (Netflix, Spotify, GitHub, SmartFit).',
+        impactAmount: 54.65,
         currency: 'USD',
         createdAt: daysAgo(1),
         suggestedAction: 'Review subscriptions to prune unused streaming or dev tools.',
