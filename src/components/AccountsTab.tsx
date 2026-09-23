@@ -11,15 +11,17 @@ import {
   Trash2, Landmark, CreditCard, PiggyBank,
   TrendingUp, Wallet, X, PlusCircle, ShieldCheck,
   Pencil, Check, Eye, EyeOff, ChevronLeft, ChevronRight,
-  GitMerge, ChevronDown, ChevronUp, AlertCircle, Info, ArrowRight
+  GitMerge, ChevronDown, ChevronUp, AlertCircle, Info, ArrowRight,
+  RefreshCw, AlertTriangle
 } from 'lucide-react';
+import { UnrecognizedAccountModal } from './UnrecognizedAccountModal';
 
 interface AccountsTabProps {
   accounts: BankAccount[];
   syncLogs: SyncLog[];
   baseCurrency: Currency;
   exchangeRates: ExchangeRates;
-  onConnectPlaid: (institutionName: string) => Promise<void>;
+  onConnectPlaid: (institutionNameOrToken: string, institutionName?: string) => Promise<void>;
   onConnectPluggy: (connectorName: string, itemId?: string) => Promise<void>;
   onFetchPluggyItem?: (itemId: string) => Promise<boolean>;
   onImportParsedFile: (parsed: ParsedImportResult, targetAccountId: string) => Promise<void>;
@@ -29,6 +31,9 @@ interface AccountsTabProps {
   onUndoRestoreDeduplicationException?: (logId: string, detailId: string) => Promise<void>;
   isImportModalOpen: boolean;
   setIsImportModalOpen: (open: boolean) => void;
+  onSyncAll?: () => void;
+  onSyncInstitution?: (institutionName: string) => Promise<void>;
+  isSyncing?: boolean;
 }
 
 export interface InstitutionGroup {
@@ -43,6 +48,8 @@ export function getCanonicalInstitutionName(rawName: string): string {
   if (!rawName) return 'Other Institution';
   const name = rawName.trim().toLowerCase();
   if (name.includes('chase') || name.includes('jpmorgan')) return 'Chase';
+  if (name.includes('morgan stanley') || name.includes('shareworks')) return 'Morgan Stanley at Work';
+  if (name.includes('computershare')) return 'Computershare';
   if (name.includes('wise') || name.includes('transferwise')) return 'Wise';
   if (name.includes('fidelity')) return 'Fidelity';
   if (name.includes('nubank') || name.includes('nu bank')) return 'Nubank';
@@ -84,6 +91,20 @@ export function groupAccountsByInstitution(
   return Object.values(groupsMap);
 }
 
+function formatSyncTime(isoString?: string): string {
+  if (!isoString) return 'Never';
+  const date = new Date(isoString);
+  const diffMinutes = Math.floor((Date.now() - date.getTime()) / 60000);
+  if (diffMinutes < 1) return 'Just now';
+  if (diffMinutes < 60) return `${diffMinutes}m ago`;
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+  const diffDays = Math.floor(diffHours / 24);
+  if (diffDays === 1) return 'Yesterday';
+  if (diffDays < 7) return `${diffDays}d ago`;
+  return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
 export const AccountsTab: React.FC<AccountsTabProps> = ({
   accounts,
   syncLogs,
@@ -99,6 +120,9 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
   onUndoRestoreDeduplicationException,
   isImportModalOpen,
   setIsImportModalOpen,
+  onSyncAll,
+  onSyncInstitution,
+  isSyncing,
 }) => {
   const [isPluggyModalOpen, setIsPluggyModalOpen] = useState(false);
   const [restoringDetailId, setRestoringDetailId] = useState<string | null>(null);
@@ -113,7 +137,12 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
     balance: '1000.00',
     mask: '...1234',
     provider: 'manual' as BankAccount['provider'],
+    excludeFromCashFlow: false,
   });
+
+  // Unrecognized account review modal state
+  const [unrecognizedAccountModalTarget, setUnrecognizedAccountModalTarget] = useState<BankAccount | null>(null);
+  const unrecognizedAccounts = accounts.filter((a) => a.unrecognizedType);
 
   // Edit Account Modal state
   const [editingAccount, setEditingAccount] = useState<BankAccount | null>(null);
@@ -124,6 +153,7 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
     balance: '0.00',
     mask: '...1234',
     institutionName: '',
+    excludeFromCashFlow: false,
   });
 
   const handleOpenEditAccount = (acc: BankAccount) => {
@@ -135,6 +165,7 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
       balance: String(acc.balance),
       mask: acc.mask || '...0000',
       institutionName: acc.institutionName,
+      excludeFromCashFlow: acc.excludeFromCashFlow ?? (acc.accountType === 'investment'),
     });
   };
 
@@ -150,6 +181,9 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
       balance: isNaN(parsedBal) ? editingAccount.balance : parsedBal,
       mask: editAccountFormData.mask,
       institutionName: editAccountFormData.institutionName.trim() || editingAccount.institutionName,
+      excludeFromCashFlow: editAccountFormData.excludeFromCashFlow,
+      unrecognizedType: false,
+      classificationWarning: undefined,
     };
     await onSaveAccount(updated);
     setEditingAccount(null);
@@ -328,6 +362,7 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
       provider: addAccountFormData.provider,
       lastSyncedAt: new Date().toISOString(),
       color: '#3B82F6',
+      excludeFromCashFlow: addAccountFormData.excludeFromCashFlow || addAccountFormData.accountType === 'investment',
     };
 
     await onSaveAccount(newAcc);
@@ -349,17 +384,16 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
           </div>
 
           <div className="flex flex-wrap gap-3">
-            <PlaidConnectButton onSuccess={async (public_token) => {
-              // Now we exchange the public_token for an access_token on our backend
+            <PlaidConnectButton onSuccess={async (public_token, metadata) => {
+              const connectedInstitution = metadata?.institution?.name;
               try {
                 const res = await safeJsonFetch<any>('/api/plaid/exchange_public_token', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ public_token }),
+                  body: JSON.stringify({ public_token, institution: metadata?.institution }),
                 });
                 if (res.ok && res.data && res.data.access_token) {
-                  // Now sync using this access token
-                  await onConnectPlaid(res.data.access_token);
+                  await onConnectPlaid(res.data.access_token, connectedInstitution);
                 } else {
                   console.error('Failed to exchange public token', res.error);
                 }
@@ -384,10 +418,53 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
               <span>Import Statement</span>
             </button>
 
+            {onSyncAll && (
+              <button
+                onClick={onSyncAll}
+                disabled={isSyncing}
+                className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-md transition-all flex items-center space-x-2"
+                title="Sync all connected bank accounts"
+              >
+                <RefreshCw className={`w-4 h-4 ${isSyncing ? 'animate-spin' : ''}`} />
+                <span>{isSyncing ? 'Syncing...' : 'Sync All Banks'}</span>
+              </button>
+            )}
+
 
           </div>
         </div>
       </div>
+
+      {/* Flagged Unrecognized Accounts Banner */}
+      {unrecognizedAccounts.length > 0 && (
+        <div className="bg-amber-50 border border-amber-300/80 rounded-2xl p-4 sm:p-5 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-start sm:items-center space-x-3.5">
+            <div className="p-2.5 rounded-2xl bg-amber-100 text-amber-800 border border-amber-200 shrink-0">
+              <AlertTriangle className="w-5 h-5 text-amber-700" />
+            </div>
+            <div>
+              <div className="flex items-center space-x-2">
+                <h4 className="font-black text-amber-950 text-sm">
+                  {unrecognizedAccounts.length} Account{unrecognizedAccounts.length > 1 ? 's' : ''} Flagged for Classification Review
+                </h4>
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase bg-amber-200 text-amber-900">
+                  Plaid Notice
+                </span>
+              </div>
+              <p className="text-xs text-amber-800/90 mt-0.5 max-w-2xl leading-relaxed">
+                Plaid returned non-standard classifications (e.g. specialized retirement, post-money accounts, HSA, 529, or trusts). They have been temporarily protected as Net Worth Only investments. Review and confirm your desired tracking settings.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => setUnrecognizedAccountModalTarget(unrecognizedAccounts[0])}
+            className="px-4 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shadow-md shadow-amber-600/20 flex items-center space-x-2 shrink-0 transition-colors cursor-pointer self-start sm:self-auto"
+          >
+            <span>Review & Classify</span>
+            <ArrowRight className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Connected Institution Tiles Grid */}
       <div className="space-y-5">
@@ -471,11 +548,24 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
                     </div>
                   </div>
 
-                  <div className="text-right">
-                    <span className="text-[10px] text-slate-400 font-semibold uppercase block">Institution Total ({baseCurrency})</span>
-                    <span className="text-lg font-black text-slate-900">
-                      {formatCurrency(group.totalInBaseCurrency, baseCurrency)}
-                    </span>
+                  <div className="flex items-center space-x-3 text-right">
+                    {onSyncInstitution && (
+                      <button
+                        onClick={() => onSyncInstitution(group.institutionName)}
+                        disabled={isSyncing}
+                        className="p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-xl transition-all border border-slate-200 hover:border-emerald-300 flex items-center space-x-1"
+                        title={`Sync ${group.institutionName}`}
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin text-emerald-600' : ''}`} />
+                        <span className="text-[11px] font-bold text-slate-700 hover:text-emerald-700 hidden sm:inline">Sync</span>
+                      </button>
+                    )}
+                    <div>
+                      <span className="text-[10px] text-slate-400 font-semibold uppercase block">Institution Total ({baseCurrency})</span>
+                      <span className="text-lg font-black text-slate-900">
+                        {formatCurrency(group.totalInBaseCurrency, baseCurrency)}
+                      </span>
+                    </div>
                   </div>
                 </div>
 
@@ -512,6 +602,25 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
                               <span className="text-[10px] uppercase font-semibold px-1.5 py-0.2 rounded bg-slate-100 text-slate-500">
                                 {acc.accountType.replace('_', ' ')}
                               </span>
+                              {acc.unrecognizedType && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setUnrecognizedAccountModalTarget(acc);
+                                  }}
+                                  className="text-[9px] font-extrabold px-2 py-0.5 rounded-full bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 flex items-center space-x-1 cursor-pointer transition-colors shadow-xs"
+                                  title={acc.classificationWarning || 'Click to review and configure how this account is classified'}
+                                >
+                                  <AlertTriangle className="w-3 h-3 text-amber-700 shrink-0" />
+                                  <span>Review Type</span>
+                                </button>
+                              )}
+                              {acc.excludeFromCashFlow && (
+                                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200" title="Counts toward Total Net Worth, but excluded from daily cash flow & budget tracking">
+                                  Net Worth Only
+                                </span>
+                              )}
                               {acc.isSandbox && (
                                 <span className="text-[9px] uppercase font-extrabold px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-200">
                                   Sandbox
@@ -524,7 +633,7 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
                               )}
                             </div>
                             <span className="text-[11px] text-slate-400">
-                              Account {acc.mask} • Synced {new Date(acc.lastSyncedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              Account {acc.mask} • Synced {formatSyncTime(acc.lastSyncedAt)}
                             </span>
                           </div>
                         </div>
@@ -1014,6 +1123,26 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
                 </div>
               </div>
 
+              {/* Exclude from Cash Flow Checkbox */}
+              <div className="bg-slate-50 p-3 rounded-xl border border-slate-200">
+                <label className="flex items-start space-x-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={addAccountFormData.excludeFromCashFlow || addAccountFormData.accountType === 'investment'}
+                    onChange={(e) => setAddAccountFormData({ ...addAccountFormData, excludeFromCashFlow: e.target.checked })}
+                    className="mt-0.5 w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500 border-slate-300"
+                  />
+                  <div>
+                    <span className="font-bold text-slate-800 text-xs block">
+                      Exclude from Cash Flow & Budget Tracking
+                    </span>
+                    <span className="text-[11px] text-slate-500 block leading-tight mt-0.5">
+                      Recommended for Fidelity 401(k), IRA, Morgan Stanley stock plans, and Brokerage accounts. Balances still count fully towards Total Net Worth.
+                    </span>
+                  </div>
+                </label>
+              </div>
+
               <div className="pt-4 flex justify-end space-x-3 border-t border-slate-100">
                 <button
                   type="button"
@@ -1144,6 +1273,26 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
                 </div>
               </div>
 
+              {/* Exclude from Cash Flow Checkbox */}
+              <div className="bg-slate-50 p-3 rounded-xl border border-slate-200">
+                <label className="flex items-start space-x-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={editAccountFormData.excludeFromCashFlow}
+                    onChange={(e) => setEditAccountFormData({ ...editAccountFormData, excludeFromCashFlow: e.target.checked })}
+                    className="mt-0.5 w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500 border-slate-300"
+                  />
+                  <div>
+                    <span className="font-bold text-slate-800 text-xs block">
+                      Exclude from Cash Flow & Budget Tracking
+                    </span>
+                    <span className="text-[11px] text-slate-500 block leading-tight mt-0.5">
+                      Check this for Fidelity 401(k), IRAs, Morgan Stanley stock plans, or Brokerages. Still contributes fully to Total Net Worth.
+                    </span>
+                  </div>
+                </label>
+              </div>
+
               <div className="pt-4 flex justify-end space-x-3 border-t border-slate-100">
                 <button
                   type="button"
@@ -1176,6 +1325,15 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
             return true;
           }
         }}
+      />
+
+      {/* Unrecognized Account Review Modal */}
+      <UnrecognizedAccountModal
+        isOpen={!!unrecognizedAccountModalTarget}
+        account={unrecognizedAccountModalTarget}
+        onClose={() => setUnrecognizedAccountModalTarget(null)}
+        onSave={onSaveAccount}
+        baseCurrency={baseCurrency}
       />
     </div>
   );

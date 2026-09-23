@@ -95,6 +95,15 @@ export function isTransferTransaction(tx: Transaction, categories: Category[]): 
     'credit card payment - thank you',
     'payment to chase card',
     'payment to amex',
+    'fidelity transfer',
+    'fidelity brokerage',
+    'fidelity 401k',
+    'morgan stanley',
+    'shareworks',
+    'ira contribution',
+    '401k contribution',
+    'brokerage deposit',
+    'transfer to fidelity',
     'resgate automatico',
     'resgate automático',
     'bb rende facil',
@@ -108,13 +117,15 @@ export function isTransferTransaction(tx: Transaction, categories: Category[]): 
 
 /**
  * Computes exact cashflow statistics (Inflow, Outflow, Net, Transfers)
- * strictly distinguishing earned inbound income from internal account transfers.
+ * strictly distinguishing earned inbound income from internal account transfers,
+ * with support for excluding long-term investment/retirement accounts.
  */
 export function computeCashflowBreakdown(
   transactions: Transaction[],
   categories: Category[],
   baseCurrency: Currency,
-  rates: Record<string, number>
+  rates: Record<string, number>,
+  excludedAccountIds?: Set<string>
 ) {
   let totalInboundIncome = 0;
   let totalOutflowExpenses = 0;
@@ -124,6 +135,8 @@ export function computeCashflowBreakdown(
   let transferCount = 0;
 
   transactions.forEach((tx) => {
+    if (tx.isDuplicate) return;
+    if (excludedAccountIds && excludedAccountIds.has(tx.accountId)) return;
     const valInBase = convertCurrency(Math.abs(tx.amount), tx.currency, baseCurrency, rates);
 
     if (isTransferTransaction(tx, categories)) {

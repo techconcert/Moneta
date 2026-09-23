@@ -133,7 +133,7 @@ export const BudgetsTab: React.FC<BudgetsTabProps> = ({
   // Compute spent amount per budget category in Base Currency for selected month
   const categorySpentMap: Record<string, number> = {};
   transactions
-    .filter((tx) => tx.amount < 0 && !isTransferTransaction(tx, categories) && (selectedMonth === 'all' || (tx.date && tx.date.startsWith(selectedMonth))))
+    .filter((tx) => tx.amount < 0 && !isTransferTransaction(tx, categories) && !tx.isDuplicate && (selectedMonth === 'all' || (tx.date && tx.date.startsWith(selectedMonth))))
     .forEach((tx) => {
       const valInBase = convertCurrency(Math.abs(tx.amount), tx.currency, baseCurrency, exchangeRates.rates);
       const catKey = tx.category.trim().toLowerCase();

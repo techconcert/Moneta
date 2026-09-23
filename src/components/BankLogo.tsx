@@ -12,6 +12,8 @@ interface BankLogoProps {
 
 export function getInstitutionDomain(institutionName: string): string {
   const name = (institutionName || '').toLowerCase().trim();
+  if (name.includes('computershare')) return 'computershare.com';
+  if (name.includes('morgan stanley') || name.includes('morganstanley')) return 'morganstanley.com';
   if (name.includes('american express') || name.includes('amex')) return 'americanexpress.com';
   if (name.includes('chase') || name.includes('jpmorgan')) return 'chase.com';
   if (name.includes('america') || name.includes('bofa')) return 'bankofamerica.com';

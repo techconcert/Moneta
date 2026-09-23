@@ -430,7 +430,7 @@ export const InsightsTab: React.FC<InsightsTabProps> = ({
                                 </div>
 
                                 {/* 3-Month Rolling Consolidation badge if multiple streams detected */}
-                                {sub.tiers && sub.tiers.length > 1 && (
+                                {sub.tiers && sub.tiers.length > 1 && sub.frequency !== 'yearly' && sub.frequency !== 'quarterly' && (
                                   <div className="flex flex-wrap items-center gap-1 pt-1">
                                     <span
                                       className="text-[9px] font-bold text-purple-800 bg-purple-50 border border-purple-200/80 px-1.5 py-0.5 rounded flex items-center gap-1"
@@ -438,7 +438,7 @@ export const InsightsTab: React.FC<InsightsTabProps> = ({
                                     >
                                       <span>{sub.tiers.length} subs</span>
                                       <span className="font-normal text-purple-600 font-mono">
-                                        ({sub.tiers.map((t) => `$${t.amount.toFixed(2)}`).join('+')})
+                                        ({sub.tiers.map((t) => formatCurrency(t.amount, sub.currency)).join(' + ')})
                                       </span>
                                     </span>
                                     {sub.pendingThisMonthCount && sub.pendingThisMonthCount > 0 ? (
@@ -596,7 +596,7 @@ export const InsightsTab: React.FC<InsightsTabProps> = ({
                                 </div>
 
                                 {/* 3-Month Rolling Consolidation badge if multiple streams detected */}
-                                {sub.tiers && sub.tiers.length > 1 && (
+                                {sub.tiers && sub.tiers.length > 1 && sub.frequency !== 'yearly' && sub.frequency !== 'quarterly' && (
                                   <div className="flex flex-wrap items-center gap-1 pt-1">
                                     <span
                                       className="text-[9px] font-bold text-indigo-800 bg-indigo-50 border border-indigo-200/80 px-1.5 py-0.5 rounded flex items-center gap-1"
@@ -604,7 +604,7 @@ export const InsightsTab: React.FC<InsightsTabProps> = ({
                                     >
                                       <span>{sub.tiers.length} subs</span>
                                       <span className="font-normal text-indigo-600 font-mono">
-                                        ({sub.tiers.map((t) => `$${t.amount.toFixed(2)}`).join('+')})
+                                        ({sub.tiers.map((t) => formatCurrency(t.amount, sub.currency)).join(' + ')})
                                       </span>
                                     </span>
                                     {sub.pendingThisMonthCount && sub.pendingThisMonthCount > 0 ? (

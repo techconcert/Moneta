@@ -193,7 +193,16 @@ export const AuditSubscriptionModal: React.FC<AuditSubscriptionModalProps> = ({
                   <button
                     key={opt.value}
                     type="button"
-                    onClick={() => setSelectedFrequency(opt.value)}
+                    onClick={() => {
+                      setSelectedFrequency(opt.value);
+                      if ((opt.value === 'yearly' || opt.value === 'quarterly') && service.charges.length > 0) {
+                        const primaryCharge = service.charges.find((c) => Math.abs(c.amount) > 2.0) || service.charges[0];
+                        const primaryAmtStr = Math.abs(primaryCharge.amount).toFixed(2);
+                        if (!customSetting?.customAmount || parseFloat(customAmountStr) === service.regularAmount) {
+                          setCustomAmountStr(primaryAmtStr);
+                        }
+                      }
+                    }}
                     className={`p-2.5 rounded-xl border text-center transition-all ${
                       isSelected
                         ? isCancelledOpt
@@ -281,8 +290,28 @@ export const AuditSubscriptionModal: React.FC<AuditSubscriptionModalProps> = ({
             </div>
           </div>
 
+          {/* Annual / Quarterly Notice */}
+          {(selectedFrequency === 'yearly' || selectedFrequency === 'quarterly') && (
+            <div className="p-3 bg-emerald-50/70 border border-emerald-200/80 rounded-xl space-y-1 text-xs text-emerald-950">
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-emerald-900 flex items-center gap-1.5">
+                  <Calendar className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>{selectedFrequency === 'yearly' ? 'Annual Subscription Cycle' : 'Quarterly Subscription Cycle'}</span>
+                </span>
+                <span className="text-[10px] text-emerald-800 font-bold bg-emerald-100 px-2 py-0.5 rounded border border-emerald-300/60">
+                  {selectedFrequency === 'yearly' ? 'Billed 1× / Year' : 'Billed 1× / 3 Months'}
+                </span>
+              </div>
+              <p className="text-[11px] text-emerald-800 leading-snug">
+                {selectedFrequency === 'yearly'
+                  ? 'Annual subscriptions renew once every 12 months. Recent charges cover you for the full year and will not bill again this month.'
+                  : 'Quarterly subscriptions renew once every 3 months. Recent charges cover you for the entire quarter and will not bill again this month.'}
+              </p>
+            </div>
+          )}
+
           {/* 3-Month Rolling Streams Breakdown (Multi-subscription vendors like Apple, Google, Amazon) */}
-          {service.tiers && service.tiers.length > 1 && (
+          {selectedFrequency !== 'yearly' && selectedFrequency !== 'quarterly' && selectedFrequency !== 'cancelled' && service.tiers && service.tiers.length > 1 && (
             <div className="p-3 bg-purple-50/70 border border-purple-200/80 rounded-xl space-y-1.5 text-xs text-purple-950">
               <div className="flex items-center justify-between">
                 <span className="font-bold text-purple-900 flex items-center gap-1.5">
@@ -305,15 +334,25 @@ export const AuditSubscriptionModal: React.FC<AuditSubscriptionModalProps> = ({
                     <span className="font-extrabold text-slate-800">
                       {formatCurrency(tier.amount, service.currency)}
                     </span>
-                    <span className="text-slate-400">/{tier.frequency === 'yearly' ? 'yr' : 'mo'}</span>
+                    <span className="text-slate-400">/{tier.frequency === 'yearly' ? 'yr' : tier.frequency === 'quarterly' ? 'qtr' : 'mo'}</span>
                     <span
                       className={`text-[9px] px-1 py-0.2 rounded font-semibold ${
                         tier.isHitThisMonth
                           ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                          : tier.frequency === 'yearly'
+                          ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                          : tier.frequency === 'quarterly'
+                          ? 'bg-blue-50 text-blue-700 border border-blue-200'
                           : 'bg-amber-50 text-amber-700 border border-amber-200'
                       }`}
                     >
-                      {tier.isHitThisMonth ? 'Billed this month' : 'Pending this month'}
+                      {tier.isHitThisMonth
+                        ? 'Billed this month'
+                        : tier.frequency === 'yearly'
+                        ? 'Covered (Annual)'
+                        : tier.frequency === 'quarterly'
+                        ? 'Covered (Quarterly)'
+                        : 'Pending this month'}
                     </span>
                   </div>
                 ))}

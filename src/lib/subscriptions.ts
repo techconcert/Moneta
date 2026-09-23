@@ -149,7 +149,7 @@ export function extractCleanMerchantName(desc: string): { key: string; displayNa
  * Checks if a transaction qualifies as a candidate for recurring charges / subscriptions.
  */
 export function isRecurringCandidate(tx: Transaction, categories: Category[]): boolean {
-  if (!tx) return false;
+  if (!tx || tx.isDuplicate) return false;
 
   // RULE 1: STRICT OUTFLOW EXPENSE ONLY
   // Income, salary, freelance, deposits, and positive amounts are NEVER subscriptions or recurring costs.
@@ -296,7 +296,7 @@ export function analyzeRecurringServices(
 
   // 2. Also check for recurring merchant patterns
   const allExpenses = transactions.filter(
-    (tx) => tx.amount < 0 && !isTransferTransaction(tx, categories)
+    (tx) => tx.amount < 0 && !isTransferTransaction(tx, categories) && !tx.isDuplicate
   );
 
   const merchantGroups: Record<string, Transaction[]> = {};
@@ -420,31 +420,26 @@ export function analyzeRecurringServices(
       } else if (descLower.includes('biweekly') || descLower.includes('quinzenal')) {
         frequency = 'biweekly';
       } else if (activeCharges.length >= 2) {
-        const sortedAsc = [...activeCharges].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+        // Filter out tiny card verifications (e.g. <= $2.00) so they don't distort interval calculation
+        const significantCharges = activeCharges.filter((c) => Math.abs(c.amount) > 2.0);
+        const chargesForCadence = significantCharges.length >= 2 ? significantCharges : activeCharges;
+        const sortedAsc = [...chargesForCadence].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
         const intervals: number[] = [];
         for (let i = 0; i < sortedAsc.length - 1; i++) {
           const diff = Math.round(
             (new Date(sortedAsc[i + 1].date).getTime() - new Date(sortedAsc[i].date).getTime()) / (1000 * 3600 * 24)
           );
-          if (diff > 0) intervals.push(diff);
+          if (diff >= 3) intervals.push(diff);
         }
         if (intervals.length > 0) {
           intervals.sort((a, b) => a - b);
           const median = intervals[Math.floor(intervals.length / 2)];
           if (median >= 5 && median <= 10) frequency = 'weekly';
           else if (median >= 11 && median <= 18) frequency = 'biweekly';
-          else if (median >= 70 && median <= 110) frequency = 'quarterly';
-          else if (median >= 300 && median <= 420) frequency = 'yearly';
+          else if (median >= 65 && median <= 115) frequency = 'quarterly';
+          else if (median >= 250 && median <= 420) frequency = 'yearly';
         }
       }
-    }
-
-    // Cluster charges into recurring sub-streams (tiers)
-    const amountGroups: Record<string, SubscriptionChargeDetail[]> = {};
-    for (const c of activeCharges) {
-      const amtKey = Math.abs(c.amount).toFixed(2);
-      if (!amountGroups[amtKey]) amountGroups[amtKey] = [];
-      amountGroups[amtKey].push(c);
     }
 
     let detectedTiers: SubscriptionTier[] = [];
@@ -459,108 +454,127 @@ export function analyzeRecurringServices(
 
     // If Annual or Quarterly:
     // Charges occur once a year or once every 3 months.
-    // If a charge happened in the last 90 days, you won't see another charge anytime soon!
-    // It is NOT "Pending this month", and historical charges of different amounts are prior renewals/changes, not concurrent subscriptions.
-    if (frequency === 'yearly') {
+    // If a charge happened in the last 90 days, you won't see another charge anytime soon.
+    // It is NEVER "Pending this month", and historical charges of different amounts are prior renewals/changes, not concurrent subscriptions.
+    if (frequency === 'yearly' || frequency === 'quarterly') {
       isConsolidatedVendor = false;
       detectedTiers = [];
       pendingThisMonthCount = 0;
       if (!userSetting?.customAmount) {
-        regularAmount = Math.abs(activeCharges[0]?.amount || latestTx.amount);
-      }
-    } else if (frequency === 'quarterly') {
-      isConsolidatedVendor = false;
-      detectedTiers = [];
-      pendingThisMonthCount = 0;
-      if (!userSetting?.customAmount) {
-        regularAmount = Math.abs(activeCharges[0]?.amount || latestTx.amount);
+        // Use the most recent non-auth charge
+        const primaryCharge = activeCharges.find((c) => Math.abs(c.amount) > 2.0) || activeCharges[0] || latestTx;
+        regularAmount = Math.abs(primaryCharge.amount);
       }
     } else {
       // Monthly, Weekly, Bi-weekly:
-      // Evaluate recurring streams for multi-subscription vendors (e.g. Apple, Google, Amazon)
+      // Multi-subscription vendor detection is ONLY applicable to recognized multi-app/ecosystem vendors
+      // where a single merchant bills multiple distinct subscription items concurrently (Apple, Google, Amazon, Microsoft).
       const isRecognizedMultiVendor =
         displayName.toLowerCase().includes('apple') ||
         displayName.toLowerCase().includes('google') ||
         displayName.toLowerCase().includes('amazon') ||
         displayName.toLowerCase().includes('microsoft');
 
-      for (const [amtStr, cList] of Object.entries(amountGroups)) {
-        const parsedAmt = parseFloat(amtStr);
-        if (parsedAmt <= 0) continue;
+      if (isRecognizedMultiVendor) {
+        // Cluster charges into recurring sub-streams (tiers)
+        const amountGroups: Record<string, SubscriptionChargeDetail[]> = {};
+        for (const c of activeCharges) {
+          if (Math.abs(c.amount) <= 2.0) continue; // Ignore card verification charges
+          const amtKey = Math.abs(c.amount).toFixed(2);
+          if (!amountGroups[amtKey]) amountGroups[amtKey] = [];
+          amountGroups[amtKey].push(c);
+        }
 
-        const sortedByDate = [...cList].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-        const mostRecentCharge = sortedByDate[0];
-        const mostRecentTime = new Date(mostRecentCharge.date).getTime();
-        const daysSince = Math.max(0, Math.round((latestLedgerTime - mostRecentTime) / (1000 * 3600 * 24)));
+        for (const [amtStr, cList] of Object.entries(amountGroups)) {
+          const parsedAmt = parseFloat(amtStr);
+          if (parsedAmt <= 0) continue;
 
-        const cDate = new Date(mostRecentCharge.date);
-        const isHitThisMonth = cDate.getFullYear() === currentYear && cDate.getMonth() === currentMonth;
+          const sortedByDate = [...cList].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+          const mostRecentCharge = sortedByDate[0];
+          const mostRecentTime = new Date(mostRecentCharge.date).getTime();
+          const daysSince = Math.max(0, Math.round((latestLedgerTime - mostRecentTime) / (1000 * 3600 * 24)));
 
-        const occurrencesIn3Months = cList.filter((c) => new Date(c.date).getTime() >= rollingStartTime).length;
-        const totalOccurrences = cList.length;
+          const cDate = new Date(mostRecentCharge.date);
+          const isHitThisMonth = cDate.getFullYear() === currentYear && cDate.getMonth() === currentMonth;
 
-        // Determine cadence of this tier
-        let tierFrequency: SubscriptionFrequency = frequency;
-        if (sortedByDate.length >= 2) {
-          const sortedAsc = [...sortedByDate].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-          const intervals: number[] = [];
-          for (let i = 0; i < sortedAsc.length - 1; i++) {
-            const diff = Math.round(
-              (new Date(sortedAsc[i + 1].date).getTime() - new Date(sortedAsc[i].date).getTime()) / (1000 * 3600 * 24)
-            );
-            if (diff > 0) intervals.push(diff);
+          const occurrencesIn3Months = cList.filter((c) => new Date(c.date).getTime() >= rollingStartTime).length;
+          const totalOccurrences = cList.length;
+
+          // Determine cadence of this tier
+          let tierFrequency: SubscriptionFrequency = frequency;
+          if (sortedByDate.length >= 2) {
+            const sortedAsc = [...sortedByDate].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+            const intervals: number[] = [];
+            for (let i = 0; i < sortedAsc.length - 1; i++) {
+              const diff = Math.round(
+                (new Date(sortedAsc[i + 1].date).getTime() - new Date(sortedAsc[i].date).getTime()) / (1000 * 3600 * 24)
+              );
+              if (diff >= 3) intervals.push(diff);
+            }
+            if (intervals.length > 0) {
+              intervals.sort((a, b) => a - b);
+              const median = intervals[Math.floor(intervals.length / 2)];
+              if (median >= 5 && median <= 10) tierFrequency = 'weekly';
+              else if (median >= 11 && median <= 18) tierFrequency = 'biweekly';
+              else if (median >= 65 && median <= 115) tierFrequency = 'quarterly';
+              else if (median >= 250 && median <= 420) tierFrequency = 'yearly';
+            }
           }
-          if (intervals.length > 0) {
-            intervals.sort((a, b) => a - b);
-            const median = intervals[Math.floor(intervals.length / 2)];
-            if (median >= 5 && median <= 10) tierFrequency = 'weekly';
-            else if (median >= 11 && median <= 18) tierFrequency = 'biweekly';
+
+          // Active tier check for monthly multi-vendors
+          let isTierActive = false;
+          if (occurrencesIn3Months >= 2) {
+            isTierActive = true;
+          } else if (occurrencesIn3Months === 1) {
+            if (daysSince <= 65) {
+              isTierActive = true;
+            }
+          }
+
+          if (isTierActive) {
+            detectedTiers.push({
+              amount: parsedAmt,
+              frequency: tierFrequency,
+              occurrencesIn3Months,
+              totalOccurrences,
+              lastDate: mostRecentCharge.date,
+              isHitThisMonth,
+              daysSinceLastCharge: daysSince,
+              monthlyContribution: calculateMonthlyCost(parsedAmt, tierFrequency),
+            });
           }
         }
 
-        let isTierActive = false;
-        if (occurrencesIn3Months >= 2) {
-          isTierActive = true;
-        } else if (occurrencesIn3Months === 1) {
-          if (isRecognizedMultiVendor && daysSince <= 65) {
-            isTierActive = true;
-          } else if (totalOccurrences >= 2 && daysSince <= 45) {
-            isTierActive = true;
-          }
-        }
+        detectedTiers.sort((a, b) => b.amount - a.amount);
 
-        if (isTierActive) {
-          detectedTiers.push({
-            amount: parsedAmt,
-            frequency: tierFrequency,
-            occurrencesIn3Months,
-            totalOccurrences,
-            lastDate: mostRecentCharge.date,
-            isHitThisMonth,
-            daysSinceLastCharge: daysSince,
-            monthlyContribution: calculateMonthlyCost(parsedAmt, tierFrequency),
-          });
+        if (detectedTiers.length > 1) {
+          isConsolidatedVendor = true;
+          pendingThisMonthCount = detectedTiers.filter(
+            (t) => !t.isHitThisMonth && t.frequency !== 'yearly' && t.frequency !== 'quarterly'
+          ).length;
+          if (!userSetting?.customAmount) {
+            regularAmount = Number(detectedTiers.reduce((acc, t) => acc + t.monthlyContribution, 0).toFixed(2));
+          }
+        } else if (detectedTiers.length === 1) {
+          if (!userSetting?.customAmount) {
+            regularAmount = detectedTiers[0].amount;
+          }
+          pendingThisMonthCount =
+            !detectedTiers[0].isHitThisMonth &&
+            detectedTiers[0].frequency !== 'yearly' &&
+            detectedTiers[0].frequency !== 'quarterly'
+              ? 1
+              : 0;
         }
       }
 
-      // Sort detected tiers by amount descending
-      detectedTiers.sort((a, b) => b.amount - a.amount);
-
-      if (detectedTiers.length > 1) {
-        isConsolidatedVendor = true;
-        pendingThisMonthCount = detectedTiers.filter((t) => !t.isHitThisMonth).length;
-        if (!userSetting?.customAmount) {
-          regularAmount = Number(detectedTiers.reduce((acc, t) => acc + t.monthlyContribution, 0).toFixed(2));
-        }
-      } else if (detectedTiers.length === 1) {
-        if (!userSetting?.customAmount) {
-          regularAmount = detectedTiers[0].amount;
-        }
-        pendingThisMonthCount = !detectedTiers[0].isHitThisMonth ? 1 : 0;
-      } else {
-        if (!userSetting?.customAmount && activeCharges.length > 0) {
-          regularAmount = Math.abs(activeCharges[0].amount);
-        }
+      // Single vendor (non-multi) or fallback when no tiers detected
+      if (!isConsolidatedVendor && !userSetting?.customAmount) {
+        const primaryCharge = activeCharges.find((c) => Math.abs(c.amount) > 2.0) || activeCharges[0] || latestTx;
+        regularAmount = Math.abs(primaryCharge.amount);
+        const cDate = new Date(primaryCharge.date);
+        const isHitThisMonth = cDate.getFullYear() === currentYear && cDate.getMonth() === currentMonth;
+        pendingThisMonthCount = !isHitThisMonth ? 1 : 0;
       }
     }
 

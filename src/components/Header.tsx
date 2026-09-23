@@ -7,6 +7,7 @@ import {
   LayoutDashboard,
   Receipt,
   Building2,
+  TrendingUp,
   PieChart,
   Sparkles,
   Settings,
@@ -37,7 +38,10 @@ function formatShortTime(isoString?: string): string {
   if (diffMinutes < 60) return `${diffMinutes}m ago`;
   const diffHours = Math.floor(diffMinutes / 60);
   if (diffHours < 24) return `${diffHours}h ago`;
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const diffDays = Math.floor(diffHours / 24);
+  if (diffDays === 1) return 'Yesterday';
+  if (diffDays < 7) return `${diffDays}d ago`;
+  return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -57,10 +61,11 @@ export const Header: React.FC<HeaderProps> = ({
   const tabs = [
     { id: 'overview', label: 'Overview', icon: LayoutDashboard },
     { id: 'transactions', label: 'Transactions', icon: Receipt },
-    { id: 'accounts', label: 'Accounts & Integrations', icon: Building2 },
-    { id: 'budgets', label: 'Budgets & Categories', icon: PieChart },
-    { id: 'insights', label: 'AI Advisor', icon: Sparkles },
-    { id: 'settings', label: 'Settings & Privacy', icon: Settings },
+    { id: 'accounts', label: 'Accounts', icon: Building2 },
+    { id: 'investments', label: 'Investments', icon: TrendingUp },
+    { id: 'budgets', label: 'Budgets', icon: PieChart },
+    { id: 'insights', label: 'Advisor', icon: Sparkles },
+    { id: 'settings', label: 'Settings', icon: Settings },
   ];
 
   return (

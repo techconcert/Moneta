@@ -8,7 +8,7 @@ import { BankLogo } from './BankLogo';
 import {
   Search, Plus, Sparkles, Trash2, Edit3,
   Upload, X, Calendar, ChevronLeft, ChevronRight,
-  Filter, RotateCcw, ArrowLeftRight, RefreshCw
+  Filter, RotateCcw, ArrowLeftRight, RefreshCw, Copy
 } from 'lucide-react';
 
 interface TransactionsTabProps {
@@ -27,7 +27,7 @@ interface TransactionsTabProps {
   onClearCategoryFilter?: () => void;
   activeMonthFilter?: string;
   onClearMonthFilter?: () => void;
-  activeTypeFilter?: 'all' | 'income' | 'expense' | 'transfer';
+  activeTypeFilter?: 'all' | 'income' | 'expense' | 'transfer' | 'duplicate';
   onClearTypeFilter?: () => void;
   initialSearchTerm?: string;
   onClearSearchTerm?: () => void;
@@ -58,7 +58,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
   const [categoryFilter, setCategoryFilter] = useState(activeCategoryFilter);
   const [accountFilter, setAccountFilter] = useState('all');
   const [currencyFilter, setCurrencyFilter] = useState('all');
-  const [typeFilter, setTypeFilter] = useState<'all' | 'income' | 'expense' | 'transfer'>(activeTypeFilter);
+  const [typeFilter, setTypeFilter] = useState<'all' | 'income' | 'expense' | 'transfer' | 'duplicate'>(activeTypeFilter);
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
 
@@ -162,6 +162,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
     tags: '',
     notes: '',
     isRecurring: false,
+    isDuplicate: false,
   });
 
   const resetPage = () => setCurrentPage(1);
@@ -178,6 +179,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
       tags: 'manual',
       notes: '',
       isRecurring: false,
+      isDuplicate: false,
     });
     setEditingTx(null);
     setIsAddModalOpen(true);
@@ -196,6 +198,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
       tags: tx.tags.join(', '),
       notes: tx.notes || '',
       isRecurring: !!tx.isRecurring,
+      isDuplicate: !!tx.isDuplicate,
     });
     setIsAddModalOpen(true);
   };
@@ -220,6 +223,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
       tags: formData.tags.split(',').map((t) => t.trim()).filter(Boolean),
       pending: false,
       isRecurring: formData.isRecurring,
+      isDuplicate: formData.isDuplicate,
       notes: formData.notes,
       provider: editingTx ? editingTx.provider : 'manual',
       isManualCategory: true,
@@ -244,11 +248,13 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
 
     let matchesType = true;
     if (typeFilter === 'income') {
-      matchesType = tx.amount > 0 && !isTransfer;
+      matchesType = tx.amount > 0 && !isTransfer && !tx.isDuplicate;
     } else if (typeFilter === 'expense') {
-      matchesType = tx.amount < 0 && !isTransfer;
+      matchesType = tx.amount < 0 && !isTransfer && !tx.isDuplicate;
     } else if (typeFilter === 'transfer') {
-      matchesType = isTransfer;
+      matchesType = isTransfer && !tx.isDuplicate;
+    } else if (typeFilter === 'duplicate') {
+      matchesType = !!tx.isDuplicate;
     }
 
     const matchesStartDate = !startDate || tx.date >= startDate;
@@ -406,7 +412,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
         <select
           value={typeFilter}
           onChange={(e) => {
-            setTypeFilter(e.target.value as 'all' | 'income' | 'expense' | 'transfer');
+            setTypeFilter(e.target.value as 'all' | 'income' | 'expense' | 'transfer' | 'duplicate');
             resetPage();
             if (e.target.value === 'all' && onClearTypeFilter) onClearTypeFilter();
           }}
@@ -416,6 +422,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
           <option value="income">Inbound Income (+ Inflow)</option>
           <option value="expense">Outflow Expenses (- Spending)</option>
           <option value="transfer">Internal Account Transfers (⇄ Neutral)</option>
+          <option value="duplicate">Flagged as Duplicate</option>
         </select>
 
         {(categoryFilter !== 'all' || accountFilter !== 'all' || currencyFilter !== 'all' || typeFilter !== 'all' || searchTerm || startDate || endDate) && (
@@ -498,7 +505,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
               <tr>
                 <th className="py-3.5 px-4">Date</th>
                 <th className="py-3.5 px-4">Description</th>
-                <th className="py-3.5 px-4">Category</th>
+                <th className="py-3.5 px-4 w-48 min-w-[192px]">Category</th>
                 <th className="py-3.5 px-4">Account</th>
                 <th className="py-3.5 px-4 text-right">Native Amount</th>
                 <th className="py-3.5 px-4 text-right">In {baseCurrency}</th>
@@ -561,6 +568,11 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                               <RefreshCw className="w-2.5 h-2.5 mr-1 text-purple-500" /> Recurring
                             </span>
                           )}
+                          {tx.isDuplicate && (
+                            <span className="inline-flex items-center text-[10px] font-semibold text-amber-800 bg-amber-50 px-1.5 py-0.2 rounded border border-amber-200" title="Marked as duplicate transaction">
+                              <Copy className="w-2.5 h-2.5 mr-1 text-amber-600" /> Duplicate
+                            </span>
+                          )}
                           {tx.tags && tx.tags.length > 0 && tx.tags.map((tag, i) => (
                             <span key={i} className="text-[10px] px-1.5 py-0.2 rounded bg-slate-100 text-slate-500 font-medium">
                               #{tag}
@@ -568,7 +580,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                           ))}
                         </div>
                       </td>
-                      <td className="py-3.5 px-4">
+                      <td className="py-3.5 px-4 whitespace-nowrap">
                         <select
                           value={tx.category}
                           onChange={async (e) => {
@@ -584,7 +596,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                             borderColor: `${catColor}60`,
                             backgroundColor: `${catColor}25`,
                           }}
-                          className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-lg text-[11px] font-bold text-slate-900 border hover:border-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer shadow-2xs"
+                          className="w-48 truncate block px-2.5 py-1 rounded-lg text-[11px] font-bold text-slate-900 border hover:border-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer shadow-2xs"
                         >
                           {getFilteredCategories(sortedCategories, tx.amount, tx.category).map((c) => (
                             <option key={c.id} value={c.name}>
@@ -616,11 +628,11 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                         </div>
                       </td>
                       <td className={`py-3.5 px-4 text-right font-bold whitespace-nowrap ${
-                        isIncome ? 'text-emerald-600' : isTransfer ? 'text-slate-700' : 'text-slate-900'
+                        tx.isDuplicate ? 'text-slate-400 line-through' : isIncome ? 'text-emerald-600' : isTransfer ? 'text-slate-700' : 'text-slate-900'
                       }`}>
                         {isIncome ? '+' : isTransfer && tx.amount > 0 ? '+' : ''}{formatCurrency(tx.amount, tx.currency)}
                       </td>
-                      <td className="py-3.5 px-4 text-right font-semibold text-slate-500 whitespace-nowrap">
+                      <td className={`py-3.5 px-4 text-right font-semibold whitespace-nowrap ${tx.isDuplicate ? 'text-slate-300 line-through' : 'text-slate-500'}`}>
                         {formatCurrency(converted, baseCurrency)}
                       </td>
                       <td className="py-3.5 px-4 text-center">
@@ -860,17 +872,32 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                 />
               </div>
 
-              <div className="flex items-center space-x-3 p-3 bg-purple-50/60 rounded-xl border border-purple-100">
-                <input
-                  type="checkbox"
-                  id="isRecurring"
-                  checked={formData.isRecurring}
-                  onChange={(e) => setFormData({ ...formData, isRecurring: e.target.checked })}
-                  className="w-4 h-4 rounded text-purple-600 focus:ring-purple-500 border-slate-300"
-                />
-                <label htmlFor="isRecurring" className="text-xs font-semibold text-purple-900 cursor-pointer select-none">
-                  Mark as Recurring / Subscription charge (included in Subscriptions Audit)
-                </label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="flex items-center space-x-3 p-3 bg-purple-50/60 rounded-xl border border-purple-100 hover:bg-purple-50/80 transition-colors">
+                  <input
+                    type="checkbox"
+                    id="isRecurring"
+                    checked={formData.isRecurring}
+                    onChange={(e) => setFormData({ ...formData, isRecurring: e.target.checked })}
+                    className="w-4 h-4 rounded text-purple-600 focus:ring-purple-500 border-slate-300 cursor-pointer"
+                  />
+                  <label htmlFor="isRecurring" className="text-xs font-semibold text-purple-900 cursor-pointer select-none">
+                    Flag as subscription
+                  </label>
+                </div>
+
+                <div className="flex items-center space-x-3 p-3 bg-amber-50/60 rounded-xl border border-amber-200/80 hover:bg-amber-50/80 transition-colors">
+                  <input
+                    type="checkbox"
+                    id="isDuplicate"
+                    checked={formData.isDuplicate}
+                    onChange={(e) => setFormData({ ...formData, isDuplicate: e.target.checked })}
+                    className="w-4 h-4 rounded text-amber-600 focus:ring-amber-500 border-slate-300 cursor-pointer"
+                  />
+                  <label htmlFor="isDuplicate" className="text-xs font-semibold text-amber-900 cursor-pointer select-none">
+                    Mark as duplicate
+                  </label>
+                </div>
               </div>
 
               <div className="pt-4 flex items-center justify-end space-x-3 border-t border-slate-100">

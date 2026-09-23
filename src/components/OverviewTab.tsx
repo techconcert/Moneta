@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { BankAccount, Transaction, Category, Currency, ExchangeRates } from '../types';
+import { BankAccount, Transaction, Category, Currency, ExchangeRates, StockHolding } from '../types';
 import { formatCurrency, convertCurrency } from '../lib/currency';
 import { isTransferTransaction, computeCashflowBreakdown } from '../lib/transactions';
 import { BankLogo } from './BankLogo';
@@ -11,7 +11,7 @@ import {
 import {
   TrendingUp, TrendingDown, Landmark, CreditCard, PiggyBank,
   ArrowUpRight, ArrowDownRight, RefreshCw, Sparkles, Building2,
-  ChevronRight, Search, ShieldCheck, Wallet, Calendar, ArrowRight, ArrowLeftRight
+  ChevronRight, Search, ShieldCheck, Wallet, Calendar, ArrowRight, ArrowLeftRight, Copy
 } from 'lucide-react';
 
 interface OverviewTabProps {
@@ -20,6 +20,7 @@ interface OverviewTabProps {
   categories: Category[];
   baseCurrency: Currency;
   exchangeRates: ExchangeRates;
+  stockHoldings?: StockHolding[];
   onSelectTab: (tab: string) => void;
   onOpenSync: () => void;
   onSelectInflow?: (month: string) => void;
@@ -46,6 +47,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
   categories,
   baseCurrency,
   exchangeRates,
+  stockHoldings = [],
   onSelectTab,
   onOpenSync,
   onSelectInflow,
@@ -93,14 +95,41 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
   // Compute Total Assets, Liabilities, Net Worth in Base Currency
   let totalAssets = 0;
   let totalLiabilities = 0;
+  let liquidCash = 0;
+  let investmentAssets = 0;
+
+  // Set of account IDs excluded from day-to-day cashflow (Retirement, Brokerage, 401k, Stock Plans)
+  const excludedAccountIds = useMemo(() => {
+    return new Set(
+      accounts
+        .filter((acc) => acc.accountType === 'investment' || acc.excludeFromCashFlow)
+        .map((acc) => acc.id)
+    );
+  }, [accounts]);
 
   accounts.forEach((acc) => {
+    const isInvestment = acc.accountType === 'investment' || acc.excludeFromCashFlow;
     const balance = acc.accountType === 'credit_card' ? acc.balance * -1 : acc.balance;
     const valInBase = convertCurrency(balance, acc.currency, baseCurrency, exchangeRates.rates);
     if (valInBase >= 0) {
       totalAssets += valInBase;
+      if (isInvestment) {
+        investmentAssets += valInBase;
+      } else {
+        liquidCash += valInBase;
+      }
     } else {
       totalLiabilities += Math.abs(valInBase);
+    }
+  });
+
+  // Factor all manually added and synced stock/equity positions into Total Assets and Investment Assets
+  stockHoldings.forEach((stock) => {
+    const stockMarketVal = (stock.shares || 0) * (stock.currentPrice || 0);
+    const valInBase = convertCurrency(stockMarketVal, stock.currency, baseCurrency, exchangeRates.rates);
+    if (valInBase > 0) {
+      totalAssets += valInBase;
+      investmentAssets += valInBase;
     }
   });
 
@@ -113,19 +142,21 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
   }, [transactions, selectedMonth]);
 
   // Compute Cash Flow for selected month strictly distinguishing Inbound Income from Internal Transfers
+  // and respecting the investment accounts exclusion (Fidelity, Morgan Stanley at Work, etc.)
   const cashflow = useMemo(() => {
     return computeCashflowBreakdown(
       monthTransactions,
       categories,
       baseCurrency,
-      exchangeRates.rates
+      exchangeRates.rates,
+      excludedAccountIds
     );
-  }, [monthTransactions, categories, baseCurrency, exchangeRates.rates]);
+  }, [monthTransactions, categories, baseCurrency, exchangeRates.rates, excludedAccountIds]);
 
-  // Category breakdown for Pie Chart (for selected month - spending only, excluding transfers)
+  // Category breakdown for Pie Chart (for selected month - spending only, excluding transfers and excluded investment accounts)
   const categoryTotals: Record<string, number> = {};
   monthTransactions
-    .filter((tx) => tx.amount < 0 && !isTransferTransaction(tx, categories))
+    .filter((tx) => tx.amount < 0 && !isTransferTransaction(tx, categories) && !tx.isDuplicate && !excludedAccountIds.has(tx.accountId))
     .forEach((tx) => {
       const val = convertCurrency(Math.abs(tx.amount), tx.currency, baseCurrency, exchangeRates.rates);
       categoryTotals[tx.category] = (categoryTotals[tx.category] || 0) + val;
@@ -157,7 +188,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
 
     return months.map(({ key, label }) => {
       const txsInMonth = transactions.filter((tx) => tx.date && tx.date.startsWith(key));
-      const stats = computeCashflowBreakdown(txsInMonth, categories, baseCurrency, exchangeRates.rates);
+      const stats = computeCashflowBreakdown(txsInMonth, categories, baseCurrency, exchangeRates.rates, excludedAccountIds);
 
       return {
         name: label,
@@ -165,7 +196,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
         Expenses: Math.round(stats.totalOutflowExpenses * 100) / 100,
       };
     });
-  }, [transactions, categories, baseCurrency, exchangeRates]);
+  }, [transactions, categories, baseCurrency, exchangeRates, excludedAccountIds]);
 
   // Filtered recent transactions
   const recentTransactions = monthTransactions
@@ -225,19 +256,29 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
             </div>
           </div>
 
-          <div className="mt-6 pt-4 border-t border-slate-800/80 grid grid-cols-2 gap-4">
-            <div>
-              <span className="text-xs text-slate-400 block font-medium">Total Assets</span>
-              <span className="text-sm font-bold text-emerald-400 mt-0.5 block">
-                +{formatCurrency(totalAssets, baseCurrency)}
+          <div className="mt-5 pt-3 border-t border-slate-800/80 space-y-2 text-xs">
+            <div className="flex items-center justify-between text-slate-300">
+              <span className="flex items-center space-x-1.5">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" />
+                <span className="text-slate-400">Investments & Retirement</span>
               </span>
+              <span className="font-bold text-slate-100">{formatCurrency(investmentAssets, baseCurrency)}</span>
             </div>
-            <div>
-              <span className="text-xs text-slate-400 block font-medium">Liabilities</span>
-              <span className="text-sm font-bold text-rose-400 mt-0.5 block">
-                -{formatCurrency(totalLiabilities, baseCurrency)}
+
+            <div className="flex items-center justify-between text-slate-300">
+              <span className="flex items-center space-x-1.5">
+                <span className="w-2 h-2 rounded-full bg-blue-400 inline-block" />
+                <span className="text-slate-400">Liquid Cash & Banking</span>
               </span>
+              <span className="font-bold text-slate-100">{formatCurrency(liquidCash, baseCurrency)}</span>
             </div>
+
+            {totalLiabilities > 0 && (
+              <div className="flex items-center justify-between text-slate-300 pt-1 border-t border-slate-800/50">
+                <span className="text-slate-400">Liabilities & Credit</span>
+                <span className="font-bold text-rose-400">-{formatCurrency(totalLiabilities, baseCurrency)}</span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -432,6 +473,79 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
               </div>
             );
           })}
+
+          {/* Grouped Stock Holdings & Custodians Tile (Computershare, etc.) */}
+          {stockHoldings.length > 0 && (() => {
+            const totalStockValInBase = stockHoldings.reduce((sum, s) => {
+              const val = (s.shares || 0) * (s.currentPrice || 0);
+              return sum + convertCurrency(val, s.currency, baseCurrency, exchangeRates.rates);
+            }, 0);
+
+            return (
+              <div
+                onClick={() => onSelectTab('investments')}
+                className="p-4 rounded-2xl border border-emerald-200 bg-emerald-50/40 hover:bg-emerald-50/70 transition-all shadow-xs flex flex-col justify-between cursor-pointer group"
+                title="Click to view all stock holdings in the Investments tab"
+              >
+                <div>
+                  <div className="flex items-start justify-between pb-3 border-b border-emerald-100">
+                    <div className="flex items-center space-x-3">
+                      <BankLogo institutionName={stockHoldings[0]?.institution || 'Computershare'} size="md" color="#10B981" />
+                      <div>
+                        <h4 className="text-sm font-extrabold text-slate-900 group-hover:text-emerald-700 transition-colors">
+                          Equities & Stocks
+                        </h4>
+                        <p className="text-[11px] text-slate-500">
+                          {stockHoldings.length} tracked position{stockHoldings.length === 1 ? '' : 's'}
+                        </p>
+                      </div>
+                    </div>
+
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border bg-emerald-100 text-emerald-800 border-emerald-200">
+                      INVESTMENTS
+                    </span>
+                  </div>
+
+                  <div className="mt-3 space-y-2">
+                    {stockHoldings.slice(0, 3).map((stock) => {
+                      const posVal = stock.shares * stock.currentPrice;
+                      return (
+                        <div key={stock.id} className="flex items-center justify-between text-xs p-1.5 rounded-lg hover:bg-white/80 transition-colors">
+                          <div className="flex items-center space-x-2 truncate">
+                            <span className="w-6 h-6 rounded-md bg-slate-900 text-white font-mono font-bold text-[10px] flex items-center justify-center shrink-0">
+                              {stock.symbol.slice(0, 3)}
+                            </span>
+                            <div className="truncate">
+                              <span className="font-bold text-slate-800 block truncate leading-tight">{stock.symbol}</span>
+                              <span className="text-[10px] text-slate-400 block truncate">{stock.institution || 'Computershare'}</span>
+                            </div>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <span className="font-black text-xs text-slate-900 block">
+                              {formatCurrency(posVal, stock.currency)}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {stockHoldings.length > 3 && (
+                      <p className="text-[10px] text-slate-500 text-center pt-1 font-medium">
+                        +{stockHoldings.length - 3} more holding{stockHoldings.length - 3 === 1 ? '' : 's'}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="mt-4 pt-3 border-t border-emerald-100 flex items-center justify-between text-xs">
+                  <span className="text-[10px] font-semibold text-slate-400 uppercase">Equities Total ({baseCurrency})</span>
+                  <span className="font-extrabold text-emerald-700 flex items-center">
+                    {formatCurrency(totalStockValInBase, baseCurrency)}
+                    <ChevronRight className="w-3.5 h-3.5 ml-1 text-emerald-600 group-hover:translate-x-0.5 transition-transform" />
+                  </span>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       </div>
 
@@ -590,6 +704,11 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                           <ArrowLeftRight className="w-2.5 h-2.5 mr-1 text-slate-400" /> Transfer
                         </span>
                       )}
+                      {tx.isDuplicate && (
+                        <span className="inline-flex items-center text-[10px] text-amber-700 font-semibold mt-0.5 bg-amber-50 px-1.5 py-0.2 rounded border border-amber-200" title="Duplicate transaction">
+                          <Copy className="w-2.5 h-2.5 mr-1 text-amber-600" /> Duplicate
+                        </span>
+                      )}
                     </td>
                     <td className="py-3">
                       <span className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-[11px] font-semibold border ${
@@ -610,11 +729,11 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                       </div>
                     </td>
                     <td className={`py-3 text-right font-bold whitespace-nowrap ${
-                      isIncome ? 'text-emerald-600' : isTransfer ? 'text-slate-700' : 'text-slate-900'
+                      tx.isDuplicate ? 'text-slate-400 line-through' : isIncome ? 'text-emerald-600' : isTransfer ? 'text-slate-700' : 'text-slate-900'
                     }`}>
                       {isIncome ? '+' : isTransfer && tx.amount > 0 ? '+' : ''}{formatCurrency(tx.amount, tx.currency)}
                     </td>
-                    <td className="py-3 text-right font-semibold text-slate-500 whitespace-nowrap">
+                    <td className={`py-3 text-right font-semibold whitespace-nowrap ${tx.isDuplicate ? 'text-slate-300 line-through' : 'text-slate-500'}`}>
                       {formatCurrency(converted, baseCurrency)}
                     </td>
                   </tr>

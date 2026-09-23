@@ -3,10 +3,22 @@ import { usePlaidLink } from 'react-plaid-link';
 import { Building2, RefreshCw } from 'lucide-react';
 
 interface PlaidConnectButtonProps {
-  onSuccess: (public_token: string) => Promise<void>;
+  onSuccess: (public_token: string, metadata?: any) => Promise<void>;
+  className?: string;
+  label?: string;
+  icon?: React.ReactNode;
+  title?: string;
+  children?: React.ReactNode;
 }
 
-export const PlaidConnectButton: React.FC<PlaidConnectButtonProps> = ({ onSuccess }) => {
+export const PlaidConnectButton: React.FC<PlaidConnectButtonProps> = ({
+  onSuccess,
+  className,
+  label,
+  icon,
+  title,
+  children,
+}) => {
   const [linkToken, setLinkToken] = useState<string | null>(null);
   const [isGeneratingToken, setIsGeneratingToken] = useState(false);
 
@@ -42,19 +54,36 @@ export const PlaidConnectButton: React.FC<PlaidConnectButtonProps> = ({ onSucces
   const { open, ready } = usePlaidLink({
     token: linkToken!,
     onSuccess: (public_token, metadata) => {
-      onSuccess(public_token);
+      onSuccess(public_token, metadata);
     },
     clientName: "Moneta",
   });
+
+  const defaultClassName = "px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-md transition-all flex items-center space-x-2 disabled:opacity-50 disabled:cursor-not-allowed";
 
   return (
     <button
       onClick={() => open()}
       disabled={!ready || isGeneratingToken || !linkToken}
-      className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-md transition-all flex items-center space-x-2 disabled:opacity-50 disabled:cursor-not-allowed"
+      className={className || defaultClassName}
+      title={title}
     >
-      {isGeneratingToken ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Building2 className="w-4 h-4" />}
-      <span>{isGeneratingToken ? "Loading Plaid..." : "Via Plaid 🇺🇸"}</span>
+      {children ? (
+        children
+      ) : (
+        <>
+          {isGeneratingToken ? (
+            <RefreshCw className="w-4 h-4 animate-spin" />
+          ) : (
+            icon || <Building2 className="w-4 h-4" />
+          )}
+          <span>
+            {isGeneratingToken
+              ? "Loading Plaid..."
+              : (label || "Via Plaid 🇺🇸")}
+          </span>
+        </>
+      )}
     </button>
   );
 };

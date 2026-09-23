@@ -1,8 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import {
   BankAccount, Transaction, Category, Budget,
   ExchangeRates, SyncLog, AIInsight, Currency, UserPreferences, BackupSnapshot, AccountType, IntegrationProvider,
-  DeduplicationDetail
+  DeduplicationDetail, StockHolding
 } from './types';
 import { db } from './lib/db';
 import { DEFAULT_RATES, convertCurrency } from './lib/currency';
@@ -12,12 +12,14 @@ import { Header } from './components/Header';
 import { OverviewTab } from './components/OverviewTab';
 import { TransactionsTab } from './components/TransactionsTab';
 import { AccountsTab } from './components/AccountsTab';
+import { InvestmentsTab } from './components/InvestmentsTab';
 import { BudgetsTab } from './components/BudgetsTab';
 import { InsightsTab } from './components/InsightsTab';
 import { SettingsTab } from './components/SettingsTab';
 import { ImportWizardModal } from './components/ImportWizardModal';
 import { Sparkles, CheckCircle2 } from 'lucide-react';
 import { safeJsonFetch } from './lib/api';
+import { classifyPlaidAccount } from './lib/plaidClassifier';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('overview');
@@ -35,6 +37,7 @@ export default function App() {
   const [syncLogs, setSyncLogs] = useState<SyncLog[]>([]);
   const [insights, setInsights] = useState<AIInsight[]>([]);
   const [backups, setBackups] = useState<BackupSnapshot[]>([]);
+  const [stockHoldings, setStockHoldings] = useState<StockHolding[]>([]);
   const [baseCurrency, setBaseCurrency] = useState<Currency>('USD');
 
   // UI state
@@ -60,14 +63,43 @@ export default function App() {
   }, [transactions, visibleAccounts]);
 
   const netWorth = React.useMemo(() => {
-    return visibleAccounts.reduce(
+    const accountNet = visibleAccounts.reduce(
       (sum, acc) => {
         const balance = acc.accountType === 'credit_card' ? acc.balance * -1 : acc.balance;
         return sum + convertCurrency(balance, acc.currency, baseCurrency, exchangeRates.rates);
       },
       0
     );
-  }, [visibleAccounts, baseCurrency, exchangeRates.rates]);
+
+    const stockNet = stockHoldings.reduce(
+      (sum, s) => {
+        const holdingVal = s.shares * s.currentPrice;
+        return sum + convertCurrency(holdingVal, s.currency, baseCurrency, exchangeRates.rates);
+      },
+      0
+    );
+
+    return accountNet + stockNet;
+  }, [visibleAccounts, stockHoldings, baseCurrency, exchangeRates.rates]);
+
+  const lastBankSyncTime = useMemo(() => {
+    let latest = 0;
+    if (syncLogs && syncLogs.length > 0) {
+      for (const log of syncLogs) {
+        const t = new Date(log.timestamp).getTime();
+        if (!isNaN(t) && t > latest) latest = t;
+      }
+    }
+    if (accounts && accounts.length > 0) {
+      for (const acc of accounts) {
+        if (acc.lastSyncedAt) {
+          const t = new Date(acc.lastSyncedAt).getTime();
+          if (!isNaN(t) && t > latest) latest = t;
+        }
+      }
+    }
+    return latest > 0 ? new Date(latest).toISOString() : new Date().toISOString();
+  }, [syncLogs, accounts]);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -119,6 +151,89 @@ export default function App() {
         localStorage.setItem('moneta_seeded', 'true');
       }
 
+      // Safe deduplication: Only remove exact duplicate records that share the identical account ID
+      const allDbAccounts = await db.getAccounts();
+      const seenAccountIds = new Set<string>();
+      for (const a of allDbAccounts) {
+        if (seenAccountIds.has(a.id)) {
+          console.warn(`[Deduplication] Removing duplicate account instance with identical ID: ${a.id}`);
+          await db.deleteAccount(a.id);
+        } else {
+          seenAccountIds.add(a.id);
+        }
+      }
+      accs = await db.getAccounts();
+
+      // Individual Account Institution Restoration & Data Healing
+      // Accurately map each account based on its own identity, without cross-account contamination
+      const currentAccounts = await db.getAccounts();
+      let accountsUpdated = false;
+      for (const a of currentAccounts) {
+        const text = `${a.name || ''} ${a.id || ''}`.toLowerCase();
+
+        let correctInst: string | null = null;
+        let correctColor: string | null = null;
+
+        if (text.includes('sofi')) {
+          correctInst = 'SoFi';
+          correctColor = '#00B2A9';
+        } else if (text.includes('amex') || text.includes('american express')) {
+          correctInst = 'American Express';
+          correctColor = '#006FCF';
+        } else if (text.includes('wise') || text.includes('transferwise')) {
+          correctInst = 'Wise';
+          correctColor = '#9FE870';
+        } else if (text.includes('morgan stanley') || text.includes('shareworks')) {
+          correctInst = 'Morgan Stanley at Work';
+          correctColor = '#002B49';
+        } else if (text.includes('fidelity') || text.includes('netbenefits') || text.includes('fmr')) {
+          correctInst = 'Fidelity';
+          correctColor = '#1b7340';
+        } else if (text.includes('chase') || text.includes('jpmorgan')) {
+          correctInst = 'Chase';
+          correctColor = '#117ACA';
+        } else if (text.includes('schwab')) {
+          correctInst = 'Charles Schwab';
+          correctColor = '#00A3E0';
+        } else if (text.includes('capital one')) {
+          correctInst = 'Capital One';
+          correctColor = '#D03027';
+        } else if (text.includes('citi')) {
+          correctInst = 'Citibank';
+          correctColor = '#003B70';
+        } else if (text.includes('bofa') || text.includes('bank of america')) {
+          correctInst = 'Bank of America';
+          correctColor = '#E31837';
+        } else if (text.includes('wells fargo')) {
+          correctInst = 'Wells Fargo';
+          correctColor = '#D71E28';
+        }
+
+        if (correctInst && a.institutionName !== correctInst) {
+          console.log(`[Account-Restore] Restoring account "${a.name}" (${a.id}) to "${correctInst}" (was "${a.institutionName}")`);
+          a.institutionName = correctInst;
+          if (correctColor) a.color = correctColor;
+          if (correctInst === 'Fidelity' || correctInst === 'Morgan Stanley at Work') {
+            if (a.accountType === 'investment') a.excludeFromCashFlow = true;
+          }
+          await db.saveAccount(a);
+          accountsUpdated = true;
+        }
+      }
+
+      if (accountsUpdated) {
+        accs = await db.getAccounts();
+        const allTxs = await db.getTransactions();
+        const accMap = new Map(accs.map(a => [a.id, a]));
+        for (const t of allTxs) {
+          const acc = accMap.get(t.accountId);
+          if (acc && t.accountName !== acc.name) {
+            t.accountName = acc.name;
+            await db.saveTransaction(t);
+          }
+        }
+      }
+
       const dedupStartup = await db.cleanupDuplicateTransactions();
       if (dedupStartup.count > 0 && dedupStartup.details.length > 0) {
         await db.addSyncLog({
@@ -159,7 +274,7 @@ export default function App() {
         }
       }
 
-      const [txs, cats, bdgs, exRates, logs, ins, prefs, currentBackups] = await Promise.all([
+      const [txs, cats, bdgs, exRates, logs, ins, prefs, currentBackups, loadedHoldings] = await Promise.all([
         db.getTransactions(),
         db.getCategories(),
         db.getBudgets(),
@@ -168,6 +283,7 @@ export default function App() {
         db.getInsights(),
         db.getPreferences(),
         db.getBackups(),
+        db.getStockHoldings(),
       ]);
 
       setAccounts(accs);
@@ -178,6 +294,7 @@ export default function App() {
       setSyncLogs(logs);
       setInsights(ins);
       setBackups(currentBackups);
+      setStockHoldings(loadedHoldings || []);
       
       if (prefs && prefs.baseCurrency) {
         setBaseCurrency(prefs.baseCurrency);
@@ -429,7 +546,7 @@ export default function App() {
   };
 
   // Reusable helper to process and map Plaid sync payload to Moneta schema
-  const processPlaidSyncResult = async (data: { accounts: any[]; transactions: any[] }, accessToken: string) => {
+  const processPlaidSyncResult = async (data: { accounts: any[]; transactions: any[]; institution?: any }, accessToken: string, explicitInstitutionName?: string) => {
     if (!data.accounts || !data.transactions) return { accountsCount: 0, txsCount: 0 };
 
     const isSandboxToken = (token: string) => {
@@ -437,74 +554,132 @@ export default function App() {
     };
 
     const newAccounts = data.accounts.map((acc: any) => {
-      const existing = accounts.find((a) => a.id === `plaid_${acc.account_id}`);
+      const existing = accounts.find((a) =>
+        a.id === `plaid_${acc.account_id}` ||
+        a.id === `acc_${acc.account_id}` ||
+        a.id === acc.account_id
+      );
       const token = accessToken || existing?.providerItemId || 'access-sandbox-dummy';
       const isSandbox = isSandboxToken(token);
 
-      // Determine proper account classification from Plaid type & subtype
-      const type = (acc.type || '').toLowerCase();
-      const subtype = (acc.subtype || '').toLowerCase();
-      const nameLower = (acc.name || '').toLowerCase();
-      const officialLower = (acc.official_name || '').toLowerCase();
-
-      let detectedType: AccountType = 'checking';
-      if (
-        subtype === 'savings' ||
-        subtype === 'cd' ||
-        subtype === 'money market' ||
-        type === 'savings' ||
-        nameLower.includes('savings') ||
-        officialLower.includes('savings')
-      ) {
-        detectedType = 'savings';
-      } else if (subtype === 'credit card' || type === 'credit' || subtype === 'credit') {
-        detectedType = 'credit_card';
-      } else if (
-        type === 'investment' ||
-        subtype === 'brokerage' ||
-        subtype === '401k' ||
-        subtype === 'ira' ||
-        subtype === 'roth' ||
-        subtype === 'mutual fund'
-      ) {
-        detectedType = 'investment';
-      } else if (type === 'loan' || subtype === 'mortgage' || subtype === 'student' || subtype === 'loan') {
-        detectedType = 'loan';
-      }
+      // Classify account using Plaid type, subtype and contextual attributes
+      const classification = classifyPlaidAccount(acc, existing);
+      const detectedType = classification.detectedType;
+      const isUnrecognized = existing?.unrecognizedType !== false ? classification.isUnrecognized : false;
 
       // Live balance directly from Plaid API without any manual overrides
       const rawBalance = typeof acc.balances?.current === 'number'
         ? acc.balances.current
-        : (typeof acc.balances?.available === 'number' ? acc.balances.available : 0);
+        : (typeof acc.balances?.available === 'number' ? acc.balances.available : (existing?.balance ?? 0));
 
       const maskStr = acc.mask ? `...${acc.mask}` : (existing?.mask || '...0000');
-      const instName = existing?.institutionName || (officialLower.includes('wise') || nameLower.includes('wise') ? 'Wise' : 'Plaid Connected Bank');
+      
+      const nameLower = (acc.name || '').toLowerCase();
+      const officialLower = (acc.official_name || '').toLowerCase();
+      const accIdLower = (acc.account_id || '').toLowerCase();
+      const combined = `${nameLower} ${officialLower} ${accIdLower}`;
+
+      let instName: string;
+      if (acc.institution_name && acc.institution_name !== 'Other Institution' && acc.institution_name !== 'Bank') {
+        instName = acc.institution_name;
+      } else if (combined.includes('sofi')) {
+        instName = 'SoFi';
+      } else if (combined.includes('amex') || combined.includes('american express')) {
+        instName = 'American Express';
+      } else if (combined.includes('wise') || combined.includes('transferwise')) {
+        instName = 'Wise';
+      } else if (combined.includes('fidelity') || combined.includes('netbenefits') || combined.includes('fmr')) {
+        instName = 'Fidelity';
+      } else if (combined.includes('morgan stanley') || combined.includes('shareworks')) {
+        instName = 'Morgan Stanley at Work';
+      } else if (combined.includes('computershare')) {
+        instName = 'Computershare';
+      } else if (combined.includes('schwab')) {
+        instName = 'Charles Schwab';
+      } else if (combined.includes('vanguard')) {
+        instName = 'Vanguard';
+      } else if (combined.includes('chase') || combined.includes('jpmorgan')) {
+        instName = 'Chase';
+      } else if (combined.includes('capital one')) {
+        instName = 'Capital One';
+      } else if (combined.includes('citi')) {
+        instName = 'Citibank';
+      } else if (combined.includes('bofa') || combined.includes('bank of america')) {
+        instName = 'Bank of America';
+      } else if (combined.includes('wells fargo')) {
+        instName = 'Wells Fargo';
+      } else if (existing?.institutionName) {
+        instName = existing.institutionName;
+      } else if (explicitInstitutionName) {
+        instName = explicitInstitutionName;
+      } else {
+        instName = 'Connected Bank';
+      }
+
+      let brandColor = existing?.color;
+      const lowerInst = instName.toLowerCase();
+      if (lowerInst.includes('sofi')) {
+        brandColor = '#00B2A9';
+      } else if (lowerInst.includes('amex') || lowerInst.includes('american express')) {
+        brandColor = '#006FCF';
+      } else if (lowerInst.includes('wise')) {
+        brandColor = '#9FE870';
+      } else if (lowerInst.includes('fidelity')) {
+        brandColor = '#1b7340';
+      } else if (lowerInst.includes('morgan stanley')) {
+        brandColor = '#002B49';
+      } else if (lowerInst.includes('chase')) {
+        brandColor = '#117ACA';
+      } else if (lowerInst.includes('capital one')) {
+        brandColor = '#D03027';
+      } else if (lowerInst.includes('schwab')) {
+        brandColor = '#00A3E0';
+      } else if (lowerInst.includes('nubank')) {
+        brandColor = '#820AD1';
+      } else if (lowerInst.includes('itaú') || lowerInst.includes('itau')) {
+        brandColor = '#EC7000';
+      } else if (!brandColor) {
+        brandColor = detectedType === 'savings' ? '#059669' : detectedType === 'investment' ? '#1b7340' : '#117ACA';
+      }
+
+      const isInvestmentInst = lowerInst.includes('fidelity') || lowerInst.includes('morgan stanley') || lowerInst.includes('computershare') || lowerInst.includes('schwab') || lowerInst.includes('vanguard');
 
       return {
-        id: `plaid_${acc.account_id}`,
-        name: acc.name,
+        id: existing ? existing.id : `plaid_${acc.account_id}`,
+        name: existing?.name || acc.name,
         institutionName: instName,
         accountType: detectedType,
-        currency: (acc.balances?.iso_currency_code as Currency) || (acc.balances?.unofficial_currency_code as Currency) || 'USD',
+        currency: (acc.balances?.iso_currency_code as Currency) || (acc.balances?.unofficial_currency_code as Currency) || existing?.currency || 'USD',
         balance: rawBalance,
         mask: maskStr,
         provider: 'plaid' as IntegrationProvider,
         providerItemId: token,
         lastSyncedAt: new Date().toISOString(),
-        color: existing?.color || (detectedType === 'savings' ? '#059669' : '#117ACA'),
+        color: brandColor,
         logoUrl: existing?.logoUrl,
         isSandbox,
         isHidden: existing?.isHidden || false,
+        excludeFromCashFlow: isInvestmentInst ? true : (existing?.excludeFromCashFlow ?? classification.excludeFromCashFlow),
+        subtype: existing?.subtype || classification.suggestedSubtype || acc.subtype,
+        unrecognizedType: isUnrecognized,
+        rawPlaidType: classification.rawPlaidType,
+        rawPlaidSubtype: classification.rawPlaidSubtype,
+        classificationWarning: classification.warning,
       };
     });
 
     let newTransactions = data.transactions.map((tx: any) => {
-      const existing = transactions.find((t) => t.id === `plaid_tx_${tx.transaction_id}`);
-      const matchingAccount = newAccounts.find((a: any) => a.id === `plaid_${tx.account_id}`);
+      const existing = transactions.find((t) => t.id === `plaid_tx_${tx.transaction_id}` || t.externalId === tx.transaction_id);
+      const matchingAccount = newAccounts.find((a: any) =>
+        a.id === `plaid_${tx.account_id}` ||
+        a.id === `acc_${tx.account_id}` ||
+        a.id === tx.account_id
+      );
+      const targetAccountId = matchingAccount ? matchingAccount.id : `plaid_${tx.account_id}`;
       const isSandbox = matchingAccount ? matchingAccount.isSandbox : isSandboxToken(accessToken || existing?.providerItemId || 'access-sandbox-dummy');
       return {
         id: `plaid_tx_${tx.transaction_id}`,
-        accountId: `plaid_${tx.account_id}`,
+        accountId: targetAccountId,
         accountName: matchingAccount?.name || 'Bank Account',
         date: tx.date,
         description: tx.name,
@@ -596,12 +771,19 @@ export default function App() {
         if (pgRes.ok && pgRes.data) {
           if (pgRes.data.updatedAccounts && Array.isArray(pgRes.data.updatedAccounts)) {
             for (const updatedAcc of pgRes.data.updatedAccounts) {
-              const existingAcc = accounts.find(a => a.id === updatedAcc.id);
-              if (existingAcc) {
-                updatedAcc.institutionName = existingAcc.institutionName;
-                updatedAcc.name = existingAcc.name;
-              }
-              await db.saveAccount(updatedAcc);
+              const existingAcc = accounts.find(a =>
+                a.id === updatedAcc.id ||
+                (a.provider === 'pluggy' && a.mask && updatedAcc.mask && a.mask.includes(updatedAcc.mask))
+              );
+              const mergedAcc = {
+                ...updatedAcc,
+                id: existingAcc ? existingAcc.id : updatedAcc.id,
+                institutionName: existingAcc?.institutionName || updatedAcc.institutionName,
+                name: existingAcc?.name || updatedAcc.name,
+                color: existingAcc?.color || updatedAcc.color,
+                lastSyncedAt: new Date().toISOString(),
+              };
+              await db.saveAccount(mergedAcc);
             }
           }
           if (pgRes.data.newTransactions && pgRes.data.newTransactions.length > 0) {
@@ -611,6 +793,14 @@ export default function App() {
               allDedupDetails.push(...pgSaveRes.deduplicatedDetails);
             }
           }
+        }
+      }
+
+      // Also refresh timestamps for file_import accounts (such as Wise) so all linked portfolios stay fresh
+      const nowIso = new Date().toISOString();
+      for (const acc of accounts) {
+        if (acc.provider === 'file_import') {
+          await db.saveAccount({ ...acc, lastSyncedAt: nowIso });
         }
       }
 
@@ -648,17 +838,115 @@ export default function App() {
     }
   };
 
+  // Sync a single institution directly from Accounts tab
+  const handleSyncInstitution = async (institutionName: string) => {
+    setIsSyncing(true);
+    try {
+      const canonical = institutionName.toLowerCase();
+      const targetAccs = accounts.filter(a =>
+        a.institutionName.toLowerCase().includes(canonical) || canonical.includes(a.institutionName.toLowerCase())
+      );
+      if (targetAccs.length === 0) {
+        await handleSyncAll();
+        return;
+      }
+
+      let newTxsCount = 0;
+      const allDedupDetails: DeduplicationDetail[] = [];
+      const isPlaid = targetAccs.some(a => a.provider === 'plaid');
+      const isPluggy = targetAccs.some(a => a.provider === 'pluggy');
+
+      if (isPlaid) {
+        const pRes = await safeJsonFetch<any>('/api/plaid/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ accounts: targetAccs.filter(a => a.provider === 'plaid'), days: 30 }),
+        });
+        if (pRes.ok && pRes.data && pRes.data.accounts) {
+          const { txsCount, deduplicatedDetails } = await processPlaidSyncResult(pRes.data, '');
+          newTxsCount += txsCount;
+          if (deduplicatedDetails && deduplicatedDetails.length > 0) {
+            allDedupDetails.push(...deduplicatedDetails);
+          }
+        }
+      }
+
+      if (isPluggy) {
+        const pgRes = await safeJsonFetch<any>('/api/pluggy/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ accounts: targetAccs.filter(a => a.provider === 'pluggy') }),
+        });
+        if (pgRes.ok && pgRes.data) {
+          if (pgRes.data.updatedAccounts && Array.isArray(pgRes.data.updatedAccounts)) {
+            for (const updatedAcc of pgRes.data.updatedAccounts) {
+              const existingAcc = accounts.find(a =>
+                a.id === updatedAcc.id ||
+                (a.provider === 'pluggy' && a.mask && updatedAcc.mask && a.mask.includes(updatedAcc.mask))
+              );
+              const mergedAcc = {
+                ...updatedAcc,
+                id: existingAcc ? existingAcc.id : updatedAcc.id,
+                institutionName: existingAcc?.institutionName || updatedAcc.institutionName,
+                name: existingAcc?.name || updatedAcc.name,
+                color: existingAcc?.color || updatedAcc.color,
+                lastSyncedAt: new Date().toISOString(),
+              };
+              await db.saveAccount(mergedAcc);
+            }
+          }
+          if (pgRes.data.newTransactions && pgRes.data.newTransactions.length > 0) {
+            const pgSaveRes = await db.saveTransactions(pgRes.data.newTransactions);
+            newTxsCount += pgRes.data.newTransactions.length;
+            if (pgSaveRes.deduplicatedDetails && pgSaveRes.deduplicatedDetails.length > 0) {
+              allDedupDetails.push(...pgSaveRes.deduplicatedDetails);
+            }
+          }
+        }
+      }
+
+      const nowIso = new Date().toISOString();
+      for (const acc of targetAccs) {
+        if (!isPlaid && !isPluggy) {
+          await db.saveAccount({ ...acc, lastSyncedAt: nowIso });
+        }
+      }
+
+      const log: SyncLog = {
+        id: `sync_${Date.now()}`,
+        provider: isPlaid ? 'plaid' : (isPluggy ? 'pluggy' : 'file_import'),
+        status: 'success',
+        timestamp: nowIso,
+        newTransactionsCount: newTxsCount,
+        updatedAccountsCount: targetAccs.length,
+        message: `Synced ${institutionName} (${newTxsCount} new transactions).`,
+      };
+      await db.addSyncLog(log);
+      await reloadDataFromDb();
+      showToast(`⚡ ${institutionName} synced! ${newTxsCount} new transactions.`);
+    } catch (err) {
+      console.error(`Sync failed for ${institutionName}:`, err);
+      showToast(`Failed to sync ${institutionName}.`);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
   // Plaid Integration
-  const handleConnectPlaid = async (access_token: string) => {
+  const handleConnectPlaid = async (access_token: string, explicitInstitutionName?: string) => {
+    if (typeof access_token !== 'string' || !access_token.trim()) {
+      console.error('Invalid access_token passed to handleConnectPlaid:', access_token);
+      return;
+    }
     try {
       // Connect new account - trigger a one-time process backfilling full 730 days!
       const res = await safeJsonFetch<any>('/api/plaid/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ access_token, days: 730 }),
+        body: JSON.stringify({ access_token, days: 730, institution_name: explicitInstitutionName }),
       });
       if (res.ok && res.data && res.data.accounts) {
-        const { accountsCount, txsCount, deduplicatedDetails } = await processPlaidSyncResult(res.data, access_token);
+        const { accountsCount, txsCount, deduplicatedDetails } = await processPlaidSyncResult(res.data, access_token, explicitInstitutionName);
         
         await db.addSyncLog({
           id: `sync_${Date.now()}`,
@@ -999,6 +1287,27 @@ export default function App() {
     showToast('Account disconnected.');
   };
 
+  // Stock Holdings Handlers (for Investments tab, Morgan Stanley at Work, manual stocks)
+  const handleSaveStockHolding = async (holding: StockHolding) => {
+    await db.saveStockHolding(holding);
+    const updated = await db.getStockHoldings();
+    setStockHoldings(updated);
+    showToast(`Saved ${holding.symbol} position!`);
+  };
+
+  const handleDeleteStockHolding = async (id: string) => {
+    await db.deleteStockHolding(id);
+    const updated = await db.getStockHoldings();
+    setStockHoldings(updated);
+    showToast('Removed stock position.');
+  };
+
+  const handleClearAllStockHoldings = async () => {
+    await db.clearStockHoldings();
+    setStockHoldings([]);
+    showToast('All stock holdings erased.');
+  };
+
   // Deduplication Exception Restoration Handlers
   const handleRestoreDeduplicationException = async (logId: string, detailId: string) => {
     const res = await db.restoreDeduplicatedRecord(logId, detailId);
@@ -1233,8 +1542,6 @@ export default function App() {
     );
   }
 
-  const lastBankSyncTime = syncLogs[0]?.timestamp || accounts[0]?.lastSyncedAt || new Date().toISOString();
-
   return (
     <div className="min-h-screen bg-slate-100 font-sans text-slate-800 antialiased selection:bg-emerald-500 selection:text-slate-950">
       
@@ -1262,6 +1569,7 @@ export default function App() {
             categories={categories}
             baseCurrency={baseCurrency}
             exchangeRates={exchangeRates}
+            stockHoldings={stockHoldings}
             onSelectTab={setActiveTab}
             onOpenSync={handleSyncAll}
             onSelectInflow={(month) => {
@@ -1322,6 +1630,24 @@ export default function App() {
             onUndoRestoreDeduplicationException={handleUndoRestoreDeduplicationException}
             isImportModalOpen={isImportModalOpen}
             setIsImportModalOpen={setIsImportModalOpen}
+            onSyncAll={handleSyncAll}
+            onSyncInstitution={handleSyncInstitution}
+            isSyncing={isSyncing}
+          />
+        )}
+
+        {activeTab === 'investments' && (
+          <InvestmentsTab
+            accounts={visibleAccounts}
+            stockHoldings={stockHoldings}
+            baseCurrency={baseCurrency}
+            exchangeRates={exchangeRates}
+            onSaveStockHolding={handleSaveStockHolding}
+            onDeleteStockHolding={handleDeleteStockHolding}
+            onClearAllStockHoldings={handleClearAllStockHoldings}
+            onSaveAccount={handleSaveAccount}
+            onConnectPlaid={handleConnectPlaid}
+            onOpenSyncModal={handleSyncAll}
           />
         )}
 

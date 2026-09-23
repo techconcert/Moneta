@@ -19,6 +19,31 @@ export interface BankAccount {
   logoUrl?: string;
   isSandbox?: boolean;
   isHidden?: boolean;
+  excludeFromCashFlow?: boolean; // When true, balance still counts in Net Worth, but transactions & balance are excluded from living cashflow/budgets
+  subtype?: string; // e.g., '401k', 'brokerage', 'ira', 'stock_plan'
+  unrecognizedType?: boolean; // Flagged when Plaid returns a non-standard or unexpected account type/subtype
+  rawPlaidType?: string; // Original account type string returned by Plaid API (e.g., 'other', 'investment', etc.)
+  rawPlaidSubtype?: string; // Original subtype string returned by Plaid API (e.g., 'hsa', '529', 'deferred compensation', etc.)
+  classificationWarning?: string; // User-facing advisory message explaining why the account was flagged
+}
+
+export interface StockHolding {
+  id: string;
+  accountId?: string;
+  accountName?: string;
+  symbol: string; // e.g. 'AAPL', 'MSFT', 'VOO', 'FXAIX'
+  name: string; // e.g. 'Apple Inc.', 'Vanguard S&P 500 ETF'
+  shares: number; // total quantity of shares owned
+  costBasis: number; // average purchase price per share in USD
+  currentPrice: number; // current market price per share in USD
+  currency: Currency;
+  institution: string; // e.g. 'Computershare', 'Morgan Stanley at Work', 'Fidelity', 'Manual'
+  assetType?: 'stock' | 'etf' | 'mutual_fund' | 'rsu' | 'crypto';
+  vestedShares?: number; // for company equity / Morgan Stanley at Work plans
+  unvestedShares?: number; // for unvested RSUs
+  grantDate?: string;
+  notes?: string;
+  lastUpdated: string;
 }
 
 export type CategoryType = 'expense' | 'income' | 'transfer';
@@ -55,6 +80,7 @@ export interface Transaction {
   tags: string[];
   pending: boolean;
   isRecurring?: boolean;
+  isDuplicate?: boolean;
   notes?: string;
   provider: IntegrationProvider;
   externalId?: string;

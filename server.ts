@@ -57,12 +57,20 @@ app.post("/api/plaid/create_link_token", async (req, res) => {
     }
 
     const { Products, CountryCode } = await import("plaid");
+    const products = [Products.Transactions];
+    try {
+      if ((Products as any).Investments) {
+        products.push((Products as any).Investments);
+      }
+    } catch {
+      // ignore
+    }
     const request = {
       user: {
         client_user_id: "user-id", // In a real app, use the actual user ID
       },
       client_name: "Moneta Personal Finance",
-      products: [Products.Transactions],
+      products,
       country_codes: [CountryCode.Us, CountryCode.Ca],
       language: "en",
     };
@@ -119,11 +127,12 @@ app.post("/api/plaid/sync", async (req, res) => {
       if (isMockToken) {
         // Return standard mock data
         const mockAccounts = [
-          { account_id: "chase_usd", name: "Chase Sapphire Checking", type: "depository", balances: { current: 4850.00, iso_currency_code: "USD" }, mask: "4812" },
-          { account_id: "chase_savings", name: "Chase High-Yield Savings", type: "depository", balances: { current: 12500.00, iso_currency_code: "USD" }, mask: "9910" },
-          { account_id: "chase_credit", name: "Chase Freedom Unlimited", type: "credit", balances: { current: 1240.30, iso_currency_code: "USD" }, mask: "3011" },
-          { account_id: "fidelity_brokerage", name: "Fidelity Individual Brokerage", type: "investment", balances: { current: 28450.00, iso_currency_code: "USD" }, mask: "8834" },
-          { account_id: "fidelity_401k", name: "Fidelity 401(k) Retirement", type: "investment", balances: { current: 64200.00, iso_currency_code: "USD" }, mask: "9011" }
+          { account_id: "chase_usd", name: "Chase Sapphire Checking", official_name: "Chase Sapphire Checking", institution_name: "Chase", type: "depository", balances: { current: 4850.00, iso_currency_code: "USD" }, mask: "4812" },
+          { account_id: "chase_savings", name: "Chase High-Yield Savings", official_name: "Chase Savings", institution_name: "Chase", type: "depository", balances: { current: 12500.00, iso_currency_code: "USD" }, mask: "9910" },
+          { account_id: "chase_credit", name: "Chase Freedom Unlimited", official_name: "Chase Credit Card", institution_name: "Chase", type: "credit", balances: { current: 1240.30, iso_currency_code: "USD" }, mask: "3011" },
+          { account_id: "fidelity_brokerage", name: "Fidelity Individual Brokerage", official_name: "Fidelity Investments Brokerage Account", institution_name: "Fidelity", type: "investment", balances: { current: 28450.00, iso_currency_code: "USD" }, mask: "8834" },
+          { account_id: "fidelity_401k", name: "Fidelity 401(k) Retirement", official_name: "Fidelity NetBenefits 401(k) Retirement", institution_name: "Fidelity", type: "investment", balances: { current: 64200.00, iso_currency_code: "USD" }, mask: "9011" },
+          { account_id: "morgan_stanley_work", name: "Morgan Stanley at Work Stock Plan", official_name: "Morgan Stanley Shareworks Equity Plan", institution_name: "Morgan Stanley at Work", type: "investment", balances: { current: 37017.50, iso_currency_code: "USD" }, mask: "5520" }
         ];
 
         const mockTransactions: any[] = [];
@@ -180,7 +189,26 @@ app.post("/api/plaid/sync", async (req, res) => {
 
       // First fetch accounts
       const accountsResponse = await plaidClient.accountsGet({ access_token });
-      const responseAccounts = accountsResponse.data.accounts;
+      const rawAccounts = accountsResponse.data.accounts;
+      const itemData = accountsResponse.data.item;
+
+      let detectedInstitutionName: string | undefined = req.body.institution_name;
+      if (!detectedInstitutionName && itemData?.institution_id) {
+        try {
+          const instRes = await plaidClient.institutionsGetById({
+            institution_id: itemData.institution_id,
+            country_codes: ['US', 'CA', 'GB'] as any,
+          });
+          detectedInstitutionName = instRes.data.institution?.name;
+        } catch (e) {
+          console.warn("Could not fetch institution by id:", e);
+        }
+      }
+
+      const responseAccounts = rawAccounts.map((acc: any) => ({
+        ...acc,
+        institution_name: acc.institution_name || detectedInstitutionName,
+      }));
 
       // Fetch transactions
       let responseTransactions: any[] = [];
@@ -207,6 +235,10 @@ app.post("/api/plaid/sync", async (req, res) => {
       return res.json({
         accounts: responseAccounts,
         transactions: responseTransactions,
+        institution: {
+          id: itemData?.institution_id,
+          name: detectedInstitutionName,
+        },
       });
     }
 
@@ -221,14 +253,19 @@ app.post("/api/plaid/sync", async (req, res) => {
       // Process sandbox accounts if any
       if (sandboxAccountsList.length > 0) {
         const mockAccounts = [
-          { account_id: "chase_usd", name: "Chase Sapphire Checking", type: "depository", balances: { current: 4850.00, iso_currency_code: "USD" }, mask: "4812" },
-          { account_id: "chase_savings", name: "Chase High-Yield Savings", type: "depository", balances: { current: 12500.00, iso_currency_code: "USD" }, mask: "9910" },
-          { account_id: "chase_credit", name: "Chase Freedom Unlimited", type: "credit", balances: { current: 1240.30, iso_currency_code: "USD" }, mask: "3011" },
-          { account_id: "fidelity_brokerage", name: "Fidelity Individual Brokerage", type: "investment", balances: { current: 28450.00, iso_currency_code: "USD" }, mask: "8834" },
-          { account_id: "fidelity_401k", name: "Fidelity 401(k) Retirement", type: "investment", balances: { current: 64200.00, iso_currency_code: "USD" }, mask: "9011" }
+          { account_id: "chase_usd", name: "Chase Sapphire Checking", official_name: "Chase Sapphire Checking", institution_name: "Chase", type: "depository", balances: { current: 4850.00, iso_currency_code: "USD" }, mask: "4812" },
+          { account_id: "chase_savings", name: "Chase High-Yield Savings", official_name: "Chase Savings", institution_name: "Chase", type: "depository", balances: { current: 12500.00, iso_currency_code: "USD" }, mask: "9910" },
+          { account_id: "chase_credit", name: "Chase Freedom Unlimited", official_name: "Chase Credit Card", institution_name: "Chase", type: "credit", balances: { current: 1240.30, iso_currency_code: "USD" }, mask: "3011" },
+          { account_id: "fidelity_brokerage", name: "Fidelity Individual Brokerage", official_name: "Fidelity Investments Brokerage Account", institution_name: "Fidelity", type: "investment", balances: { current: 28450.00, iso_currency_code: "USD" }, mask: "8834" },
+          { account_id: "fidelity_401k", name: "Fidelity 401(k) Retirement", official_name: "Fidelity NetBenefits 401(k) Retirement", institution_name: "Fidelity", type: "investment", balances: { current: 64200.00, iso_currency_code: "USD" }, mask: "9011" },
+          { account_id: "morgan_stanley_work", name: "Morgan Stanley at Work Stock Plan", official_name: "Morgan Stanley Shareworks Equity Plan", institution_name: "Morgan Stanley at Work", type: "investment", balances: { current: 37017.50, iso_currency_code: "USD" }, mask: "5520" }
         ];
 
-        const targetAccounts = mockAccounts.filter(ma => sandboxAccountsList.some((a: any) => a.id === `plaid_${ma.account_id}` || a.id === ma.account_id));
+        const targetAccounts = mockAccounts.filter(ma => sandboxAccountsList.some((a: any) =>
+          a.id === `plaid_${ma.account_id}` ||
+          a.id === `acc_${ma.account_id}` ||
+          a.id === ma.account_id
+        ));
         const finalAccounts = targetAccounts.length > 0 ? targetAccounts : mockAccounts;
 
         mergedAccounts = mergedAccounts.concat(finalAccounts);
@@ -246,14 +283,40 @@ app.post("/api/plaid/sync", async (req, res) => {
           { name: "Payroll Direct Deposit", amount: -2450.00, category: "Income & Salary" },
           { name: "Amazon Online Purchase", amount: 35.99, category: "Shopping" },
           { name: "Spotify Premium", amount: 9.99, category: "Subscriptions & Media" },
-          { name: "Electric Bill Utility", amount: 112.40, category: "Bills & Utilities" }
+          { name: "Electric Bill Utility", amount: 112.40, category: "Bills & Utilities" },
+          { name: "Blue Bottle Coffee", amount: 7.25, category: "Restaurants & Dining" },
+          { name: "Trader Joe's", amount: 64.12, category: "Groceries" },
+          { name: "Apple Store Online", amount: 29.00, category: "Shopping" },
+          { name: "Lyft Ride", amount: 22.40, category: "Transportation" }
         ];
 
-        const txCount = Math.max(8, Math.min(250, Math.floor(pullDays / 2.5)));
+        // Guaranteed fresh transactions for today, yesterday, and 2 days ago
+        const recentOffsets = [0, 0, 1, 1, 2, 2, 3, 4];
+        for (let i = 0; i < recentOffsets.length; i++) {
+          const offset = recentOffsets[i];
+          const txDate = new Date(now.getTime() - offset * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+          const descObj = descriptions[i % descriptions.length];
+          const pickedAcc = finalAccounts[i % finalAccounts.length];
+          const accId = pickedAcc.account_id;
+          const randomCents = Number((Math.random() * 3.50).toFixed(2));
+          const finalAmt = descObj.amount > 0 ? descObj.amount + randomCents : descObj.amount - randomCents;
+
+          mockTransactions.push({
+            transaction_id: `mock_plaid_fresh_${accId}_${txDate}_${i}`,
+            account_id: accId,
+            name: descObj.name,
+            amount: Number(finalAmt.toFixed(2)),
+            iso_currency_code: pickedAcc.balances.iso_currency_code || "USD",
+            date: txDate,
+            pending: offset === 0 && i % 2 === 0
+          });
+        }
+
+        const txCount = Math.max(8, Math.min(120, Math.floor(pullDays / 2.5)));
         for (let i = 0; i < txCount; i++) {
           const dateOffset = Math.floor(Math.random() * pullDays);
           const txDate = new Date(now.getTime() - dateOffset * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-          const descObj = descriptions[i % descriptions.length];
+          const descObj = descriptions[(i + 4) % descriptions.length];
           const pickedAcc = finalAccounts[i % finalAccounts.length];
           const accId = pickedAcc.account_id;
 
@@ -264,7 +327,7 @@ app.post("/api/plaid/sync", async (req, res) => {
             transaction_id: `mock_plaid_tx_${pullDays}_${i}_${dateOffset}`,
             account_id: accId,
             name: descObj.name,
-            amount: finalAmt,
+            amount: Number(finalAmt.toFixed(2)),
             iso_currency_code: pickedAcc.balances.iso_currency_code || "USD",
             date: txDate,
             pending: false
@@ -391,6 +454,122 @@ app.get("/api/rates", async (req, res) => {
     rates: fallbackRates,
     source: "Fallback Local Cache",
     lastUpdated: new Date().toISOString(),
+  });
+});
+
+// Live Stock and Investment Quotes API
+interface CachedQuote {
+  symbol: string;
+  name: string;
+  price: number;
+  changePercent: number;
+  currency: string;
+  source: string;
+  lastUpdated: string;
+}
+
+const stockQuoteMemoryCache = new Map<string, { data: CachedQuote; cachedAt: number }>();
+const QUOTE_CACHE_TTL_MS = 60 * 1000; // 1 minute in-memory cache
+
+async function fetchLiveStockQuote(symbol: string): Promise<CachedQuote | null> {
+  const hosts = [
+    "https://query1.finance.yahoo.com",
+    "https://query2.finance.yahoo.com",
+  ];
+
+  for (const host of hosts) {
+    try {
+      const url = `${host}/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1d`;
+      const response = await fetch(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          Accept: "application/json",
+        },
+        signal: AbortSignal.timeout(6000),
+      });
+
+      if (!response.ok) {
+        continue;
+      }
+
+      const json: any = await response.json();
+      const result = json?.chart?.result?.[0];
+      if (!result) continue;
+
+      const meta = result.meta;
+      let price = meta?.regularMarketPrice;
+
+      // If market is closed or regularMarketPrice is not directly present, check latest close quote
+      if (price === undefined || price === null || isNaN(price)) {
+        const closes = result?.indicators?.quote?.[0]?.close || [];
+        for (let i = closes.length - 1; i >= 0; i--) {
+          if (typeof closes[i] === "number" && !isNaN(closes[i])) {
+            price = closes[i];
+            break;
+          }
+        }
+      }
+
+      if (price !== undefined && price !== null && !isNaN(price)) {
+        const companyName = meta?.longName || meta?.shortName || `${symbol} Equity`;
+        const currency = (meta?.currency || "USD").toUpperCase();
+        const changePercent = typeof meta?.regularMarketChangePercent === "number"
+          ? Number(meta.regularMarketChangePercent.toFixed(2))
+          : 0;
+
+        return {
+          symbol,
+          name: companyName,
+          price: Number(Number(price).toFixed(2)),
+          changePercent,
+          currency,
+          source: "live_market",
+          lastUpdated: new Date().toISOString(),
+        };
+      }
+    } catch (err: any) {
+      // Try next host on network failure
+    }
+  }
+
+  return null;
+}
+
+app.get("/api/investments/quote", async (req, res) => {
+  const symbol = (req.query.symbol as string || "").toUpperCase().trim();
+  if (!symbol) {
+    return res.status(400).json({ error: "Stock symbol is required" });
+  }
+
+  // 1. Check in-memory cache
+  const cached = stockQuoteMemoryCache.get(symbol);
+  const now = Date.now();
+  if (cached && now - cached.cachedAt < QUOTE_CACHE_TTL_MS) {
+    return res.json(cached.data);
+  }
+
+  // 2. Fetch live market quote from financial feed
+  try {
+    const liveQuote = await fetchLiveStockQuote(symbol);
+    if (liveQuote) {
+      stockQuoteMemoryCache.set(symbol, { data: liveQuote, cachedAt: now });
+      return res.json(liveQuote);
+    }
+  } catch (err: any) {
+    console.error(`Error fetching live quote for ${symbol}:`, err);
+  }
+
+  // 3. If live fetch failed but we have a slightly older cached quote, return it
+  if (cached) {
+    return res.json({
+      ...cached.data,
+      source: "cached_market",
+    });
+  }
+
+  // 4. If symbol cannot be resolved anywhere, return 404
+  return res.status(404).json({
+    error: `Could not retrieve live price for symbol "${symbol}". Please check the ticker symbol and try again.`,
   });
 });
 
@@ -827,9 +1006,10 @@ app.post("/api/pluggy/sync", async (req, res) => {
       console.warn("Could not authenticate Pluggy for sync:", e);
     }
 
+    let realItemIds: string[] = [];
     if (apiKey) {
       // Group target accounts by their unique real Item ID to trigger live bank updates
-      const realItemIds = Array.from(new Set(
+      realItemIds = Array.from(new Set(
         targetAccounts
           .filter((acc: any) => acc.provider === "pluggy" && acc.providerItemId && !acc.providerItemId.startsWith("item_pluggy_"))
           .map((acc: any) => acc.providerItemId)
@@ -858,6 +1038,63 @@ app.post("/api/pluggy/sync", async (req, res) => {
           newTransactions.push(...payload.transactions);
         } catch (e) {
           console.warn(`Pluggy live sync failed for item ${itemId}:`, e);
+        }
+      }
+    }
+
+    // Process sandbox / simulated Pluggy accounts (Nubank, Itaú, etc.)
+    const sandboxPluggyAccs = targetAccounts.filter((acc: any) =>
+      acc.provider === "pluggy" &&
+      (acc.isSandbox || !acc.providerItemId || acc.providerItemId.startsWith("item_pluggy_") || acc.providerItemId === "access-sandbox-dummy" || !realItemIds.includes(acc.providerItemId))
+    );
+
+    if (sandboxPluggyAccs.length > 0) {
+      const now = new Date();
+      const brlDescriptions = [
+        { desc: "Pix Recebido - Consultoria PJ", amount: 1450.00, category: "Income & Salary", type: "income" },
+        { desc: "iFood *Restaurante", amount: -68.90, category: "Restaurants & Dining", type: "expense" },
+        { desc: "Pão de Açúcar Supermercado", amount: -214.50, category: "Groceries", type: "expense" },
+        { desc: "Uber *Viagem", amount: -27.40, category: "Transportation", type: "expense" },
+        { desc: "Mercado Livre Eletrônicos", amount: -189.90, category: "Shopping", type: "expense" },
+        { desc: "Smart Fit Mensalidade", amount: -119.90, category: "Health & Fitness", type: "expense" },
+        { desc: "Netflix Assinatura", amount: -55.90, category: "Subscriptions & Media", type: "expense" },
+        { desc: "Posto Shell Combustível", amount: -240.00, category: "Transportation", type: "expense" },
+        { desc: "Droga Raia Farmácia", amount: -76.80, category: "Health & Fitness", type: "expense" },
+        { desc: "Padaria Artesanal Café", amount: -32.50, category: "Restaurants & Dining", type: "expense" }
+      ];
+
+      for (const acc of sandboxPluggyAccs) {
+        // Mark account as freshly synced right now
+        updatedAccounts.push({
+          ...acc,
+          lastSyncedAt: now.toISOString(),
+        });
+
+        // Generate fresh transactions for today, yesterday, and 2 days ago
+        const recentDays = [0, 1, 2, 3];
+        for (let i = 0; i < recentDays.length; i++) {
+          const dayOffset = recentDays[i];
+          const txDate = new Date(now.getTime() - dayOffset * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+          const item = brlDescriptions[(i + acc.name.length) % brlDescriptions.length];
+          const centsVariation = Number((Math.random() * 4.90).toFixed(2));
+          const finalAmount = item.amount > 0 ? item.amount + centsVariation : item.amount - centsVariation;
+
+          newTransactions.push({
+            id: `pluggy_tx_fresh_${acc.id}_${txDate}_${i}`,
+            accountId: acc.id,
+            accountName: acc.name,
+            date: txDate,
+            description: item.desc,
+            amount: Number(finalAmount.toFixed(2)),
+            currency: acc.currency || "BRL",
+            category: item.category,
+            tags: ["Open Finance", "Synced"],
+            pending: dayOffset === 0 && i === 0,
+            provider: "pluggy",
+            externalId: `ext_pluggy_${acc.id}_${txDate}_${i}`,
+            isSandbox: true,
+            isManualCategory: false
+          });
         }
       }
     }
@@ -962,6 +1199,14 @@ function categorizeTransactionsHeuristic(items: any[], allowedCategories: string
   });
 }
 
+// Standard Gemini Text Models according to Google AI Studio guidelines:
+// Primary: gemini-3.8-flash (fast, high availability), Fallbacks: gemini-3.1-flash-lite, gemini-flash-latest
+const GEMINI_TEXT_MODELS = [
+  "gemini-3.8-flash",
+  "gemini-3.1-flash-lite",
+  "gemini-flash-latest",
+];
+
 // AI Bulk Transaction Auto-Categorization (Gemini with Fallback)
 app.post("/api/ai/categorize", async (req, res) => {
   const { items, categories } = req.body;
@@ -980,9 +1225,7 @@ app.post("/api/ai/categorize", async (req, res) => {
   const ai = getGeminiClient();
 
   if (ai) {
-    const modelsToTry = ["gemini-3.6-flash", "gemini-flash-latest", "gemini-3.1-flash-lite", "gemini-3.7-flash"];
-    
-    for (const modelName of modelsToTry) {
+    for (const modelName of GEMINI_TEXT_MODELS) {
       try {
         const prompt = `Categorize the following financial transactions.
 CRITICAL: You MUST ONLY map transactions to one of the following exact existing categories in the database:
@@ -1023,8 +1266,9 @@ ${JSON.stringify(items, null, 2)}`;
           return res.json({ categorizedResults, source: "gemini", model: modelName });
         }
       } catch (err: any) {
-        console.warn(`Gemini AI Categorization with ${modelName} encountered:`, err.message || err);
-        // Continue to fallback model or heuristic
+        const errorMsg = err?.message || String(err);
+        const is503 = errorMsg.includes("503") || errorMsg.includes("UNAVAILABLE");
+        console.info(`[AI Categorization] Model ${modelName} ${is503 ? "experiencing high demand (503)" : "unavailable"}, trying fallback...`);
       }
     }
   }
@@ -1068,8 +1312,7 @@ app.post("/api/ai/generate-icon", async (req, res) => {
 
   const ai = getGeminiClient();
   if (ai) {
-    const modelsToTry = ["gemini-3.6-flash", "gemini-flash-latest", "gemini-3.1-flash-lite", "gemini-3.7-flash"];
-    for (const modelName of modelsToTry) {
+    for (const modelName of GEMINI_TEXT_MODELS) {
       try {
         const prompt = `Choose the best Lucide React icon name and a matching Tailwind accent hex color for a financial category named "${categoryName}" (${description || "personal expense/income category"}). Also supply a simple SVG path "d" attribute string for custom icon rendering.
 
@@ -1098,7 +1341,9 @@ Choose Lucide icons like: ShoppingBag, Coffee, Dumbbell, Car, Utensils, Tv, Plan
           return res.json(result);
         }
       } catch (err: any) {
-        console.warn(`AI Icon Generation with ${modelName} failed:`, err.message || err);
+        const errorMsg = err?.message || String(err);
+        const is503 = errorMsg.includes("503") || errorMsg.includes("UNAVAILABLE");
+        console.info(`[AI Icon Generator] Model ${modelName} ${is503 ? "experiencing high demand (503)" : "unavailable"}, trying fallback...`);
       }
     }
   }
@@ -1162,7 +1407,6 @@ app.post("/api/ai/insights", async (req, res) => {
 
   const ai = getGeminiClient();
   if (ai) {
-    const modelsToTry = ["gemini-3.6-flash", "gemini-flash-latest", "gemini-3.1-flash-lite", "gemini-3.7-flash"];
     const sampleLedger = (transactions || []).slice(0, 30).map((t: any) => ({
       date: t.date,
       desc: t.description,
@@ -1188,7 +1432,7 @@ Identify 3 key insights:
 2. Subscription/recurring bill analysis (CRITICAL: You must use the verified recurring subscription numbers and 3-month rolling historical data provided above: ${activeSubCount} active services totaling ${activeSubCost} ${baseCurrency || "USD"}/mo. Note that vendors like Apple/Google consolidate multiple recurring sub-streams from 3-month history even if some charges are still pending to hit later this month).
 3. An actionable saving or budget optimization tip.`;
 
-    for (const modelName of modelsToTry) {
+    for (const modelName of GEMINI_TEXT_MODELS) {
       try {
         const response = await ai.models.generateContent({
           model: modelName,
@@ -1223,7 +1467,9 @@ Identify 3 key insights:
           return res.json({ insights, source: "gemini", model: modelName });
         }
       } catch (err: any) {
-        console.warn(`AI Insights with ${modelName} failed:`, err.message || err);
+        const errorMsg = err?.message || String(err);
+        const is503 = errorMsg.includes("503") || errorMsg.includes("UNAVAILABLE");
+        console.info(`[AI Insights] Model ${modelName} ${is503 ? "experiencing high demand (503)" : "unavailable"}, trying fallback...`);
       }
     }
   }

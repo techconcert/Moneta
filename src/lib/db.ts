@@ -1,10 +1,10 @@
-import { BankAccount, Transaction, Category, Budget, ExchangeRates, SyncLog, AIInsight, UserPreferences, Currency, CategorizationRule, BackupSnapshot, DeduplicationDetail, DedupException } from '../types';
+import { BankAccount, Transaction, Category, Budget, ExchangeRates, SyncLog, AIInsight, UserPreferences, Currency, CategorizationRule, BackupSnapshot, DeduplicationDetail, DedupException, StockHolding } from '../types';
 import { DEFAULT_RATES } from './currency';
 import { getSuggestedCategoryIcon } from '../components/CategoryIcon';
 
 const DB_NAME = 'MonetaDB';
 const LEGACY_DB_NAME = 'MintLocalDB';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 
 export const DEFAULT_CATEGORIES: Category[] = [
   { id: 'cat_groceries', name: 'Groceries', icon: 'ShoppingCart', color: '#10B981', type: 'expense', isDefault: true },
@@ -20,6 +20,8 @@ export const DEFAULT_CATEGORIES: Category[] = [
   { id: 'cat_transfer', name: 'Internal Transfer', icon: 'ArrowLeftRight', color: '#64748B', type: 'transfer', isDefault: true },
   { id: 'cat_uncategorized', name: 'Uncategorized', icon: 'HelpCircle', color: '#94A3B8', type: 'expense', isDefault: true },
 ];
+
+export const DEFAULT_STOCK_HOLDINGS: StockHolding[] = [];
 
 export class LocalDatabase {
   private db: IDBDatabase | null = null;
@@ -52,6 +54,7 @@ export class LocalDatabase {
           if (!db.objectStoreNames.contains('categorizationRules')) db.createObjectStore('categorizationRules', { keyPath: 'id' });
           if (!db.objectStoreNames.contains('backups')) db.createObjectStore('backups', { keyPath: 'id' });
           if (!db.objectStoreNames.contains('dedupExceptions')) db.createObjectStore('dedupExceptions', { keyPath: 'id' });
+          if (!db.objectStoreNames.contains('stockHoldings')) db.createObjectStore('stockHoldings', { keyPath: 'id' });
         };
         
         reqNew.onsuccess = async () => {
@@ -173,6 +176,9 @@ export class LocalDatabase {
         if (!db.objectStoreNames.contains('dedupExceptions')) {
           db.createObjectStore('dedupExceptions', { keyPath: 'id' });
         }
+        if (!db.objectStoreNames.contains('stockHoldings')) {
+          db.createObjectStore('stockHoldings', { keyPath: 'id' });
+        }
       };
     });
   }
@@ -264,6 +270,44 @@ export class LocalDatabase {
     for (const t of toDelete) {
       await this.delete('transactions', t.id);
     }
+  }
+
+  // --- STOCK HOLDINGS ---
+  async getStockHoldings(): Promise<StockHolding[]> {
+    const list = await this.getAll<StockHolding>('stockHoldings');
+    // Auto-purge any legacy mock test holdings that were previously seeded
+    const testIds = new Set([
+      'holding_msft_ms_work',
+      'holding_fxaix_401k',
+      'holding_voo_fidelity_brokerage',
+      'holding_nvda_fidelity_brokerage',
+    ]);
+    const hasTestItems = list.some(h => testIds.has(h.id) || h.id.startsWith('holding_'));
+    if (hasTestItems) {
+      for (const h of list) {
+        if (testIds.has(h.id) || h.id.startsWith('holding_')) {
+          await this.delete('stockHoldings', h.id);
+        }
+      }
+      return list.filter(h => !testIds.has(h.id) && !h.id.startsWith('holding_'));
+    }
+    return list;
+  }
+
+  async saveStockHolding(holding: StockHolding): Promise<void> {
+    return this.put('stockHoldings', holding);
+  }
+
+  async saveStockHoldings(holdings: StockHolding[]): Promise<void> {
+    return this.putMany('stockHoldings', holdings);
+  }
+
+  async deleteStockHolding(id: string): Promise<void> {
+    return this.delete('stockHoldings', id);
+  }
+
+  async clearStockHoldings(): Promise<void> {
+    return this.clearStore('stockHoldings');
   }
 
   // --- CATEGORIZATION RULES & MEMORY ENGINE ---
@@ -1112,6 +1156,7 @@ export class LocalDatabase {
     await this.clearStore('preferences');
     await this.clearStore('categorizationRules');
     await this.clearStore('dedupExceptions');
+    await this.clearStore('stockHoldings');
     
     // DO NOT ERASE CATEGORIES: Reseed default categories so categories persist during a database wipe!
     await this.clearStore('categories');
@@ -1124,6 +1169,9 @@ export class LocalDatabase {
     const transactions = await this.getTransactions();
 
     const sandboxAccountIds = new Set(accounts.filter((a) => a.isSandbox).map((a) => a.id));
+
+    // Clear all stock holdings associated with demo/sandbox or test data
+    await this.clearStore('stockHoldings');
 
     for (const acc of accounts) {
       if (acc.isSandbox) {
@@ -1236,6 +1284,8 @@ export class LocalDatabase {
         lastSyncedAt: new Date(Date.now() - 3600000 * 12).toISOString(),
         color: '#006633',
         isSandbox: true,
+        excludeFromCashFlow: true,
+        subtype: 'brokerage',
       },
       {
         id: 'acc_fidelity_401k',
@@ -1250,6 +1300,24 @@ export class LocalDatabase {
         lastSyncedAt: new Date(Date.now() - 3600000 * 12).toISOString(),
         color: '#006633',
         isSandbox: true,
+        excludeFromCashFlow: true,
+        subtype: '401k',
+      },
+      {
+        id: 'acc_morgan_stanley_work',
+        name: 'Morgan Stanley at Work Stock Plan',
+        institutionName: 'Morgan Stanley at Work',
+        accountType: 'investment',
+        currency: 'USD',
+        balance: 37017.50,
+        mask: '...5520',
+        provider: 'plaid',
+        providerItemId: 'access-sandbox-dummy',
+        lastSyncedAt: new Date(Date.now() - 3600000 * 8).toISOString(),
+        color: '#002B49',
+        isSandbox: true,
+        excludeFromCashFlow: true,
+        subtype: 'stock_plan',
       },
       {
         id: 'acc_nubank_brl',
@@ -2069,6 +2137,7 @@ export class LocalDatabase {
 
     await this.saveAccounts(accounts);
     await this.saveTransactions(transactions);
+    // Keep stock holdings clean by default without mock data
 
     if (!onlyAccountsAndTxs) {
       await this.saveCategories(categories);
